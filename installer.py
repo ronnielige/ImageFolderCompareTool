@@ -80,10 +80,10 @@ def payload_dir():
 
 
 def find_app_icon():
-    """从 payload 的应用目录里找 icon.ico (打包后存在; 直接运行脚本时可能没有)。"""
-    app_dir = payload_dir() / APP_NAME
-    for name in ('icon.ico', 'icon.png'):
-        p = app_dir / name
+    """从 payload 里找应用图标 (onedir 布局: payload/_internal/icon.ico)。"""
+    for name in ('_internal/icon.ico', '_internal/icon.png', 'icon.ico',
+                 'icon.png'):
+        p = payload_dir() / name
         if p.exists():
             return p
     return None
@@ -264,7 +264,8 @@ class InstallerWindow(QWidget):
             return
         src = payload_dir()
         dst = Path(self.dir_edit.text().strip())
-        if not src.is_dir() or not (src / APP_NAME).is_dir():
+        # onedir payload 布局: payload/图片对比工具.exe + payload/_internal/
+        if not src.is_dir() or not (src / f'{APP_NAME}.exe').exists():
             QMessageBox.critical(self, '错误',
                                  '安装包数据缺失, 请重新下载安装程序。')
             return
