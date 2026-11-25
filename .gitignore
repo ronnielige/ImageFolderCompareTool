@@ -12,3 +12,6 @@ venv/
 
 # 临时预览/调试文件
 _installer_preview.png
+# UI 预览/调试截图
+_ui_left_crop.png
+_ui_preview.png
