@@ -23,7 +23,7 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QPainter, QPixmap,
                            QKeySequence, QShortcut, QIcon, QImageReader,
                            QPalette)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
-                               QGridLayout, QHBoxLayout, QInputDialog,
+                               QFrame, QGridLayout, QHBoxLayout, QInputDialog,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QPushButton, QSplitter,
                                QAbstractItemView, QVBoxLayout, QWidget,
@@ -35,6 +35,81 @@ DEFAULT_BASE = r'\\172.17.35.42\local-disk3\lr\datasets'
 ZOOM_MIN, ZOOM_MAX = 0.01, 32.0
 MAX_PANES = 6          # 最多同时显示的分屏数
 LEFT_LIST_SHORTCUT = 'Ctrl+B'
+
+# ------------------------------------------------- 现代浅色主题 (QSS)
+MODERN_QSS = '''
+* { font-size: 13px; }
+QMainWindow { background: #f5f6f8; }
+
+/* ---------- 按钮 ---------- */
+QPushButton {
+    background: #ffffff; color: #2b3440;
+    border: 1px solid #d4dae2; border-radius: 6px;
+    padding: 6px 14px;
+}
+QPushButton:hover  { border-color: #2d6ca3; color: #1b4b7a; background: #f4f8fc; }
+QPushButton:pressed { background: #e4eef8; }
+QPushButton:disabled { color: #a5aeb9; border-color: #e2e6ec; background: #f5f6f8; }
+QPushButton:focus { outline: none; }
+
+/* 强调按钮: 左右对比 / 全屏 */
+QPushButton#btnSplit, QPushButton#btnFs {
+    background: #eef4fb; color: #1b4b7a; border-color: #bcd0e4;
+}
+QPushButton#btnSplit:hover, QPushButton#btnFs:hover { background: #e0edf9; }
+QPushButton#btnSplit:checked {
+    background: #2563eb; color: #ffffff; border-color: #2563eb; font-weight: 600;
+}
+
+/* ---------- 列表 (卡片式) ---------- */
+QListWidget {
+    background: #ffffff; border: 1px solid #e2e6ec; border-radius: 8px;
+    padding: 4px; outline: 0;
+}
+QListWidget::item { padding: 5px 8px; border-radius: 5px; margin: 1px 2px; color: #2b3440; }
+QListWidget::item:hover { background: #f0f4f9; }
+QListWidget::item:selected { background: #e1eefc; color: #1b4b7a; }
+
+/* ---------- 复选框 ---------- */
+QCheckBox { color: #3d4653; spacing: 6px; }
+QCheckBox::indicator {
+    width: 16px; height: 16px;
+    border: 1.5px solid #b8c2cf; border-radius: 4px; background: #ffffff;
+}
+QCheckBox::indicator:hover { border-color: #2d6ca3; }
+QCheckBox::indicator:checked { background: #2563eb; border-color: #2563eb; }
+
+/* ---------- 左栏 / 工具栏 ---------- */
+QFrame#leftPanel { background: #f5f6f8; border: none; border-right: 1px solid #e4e8ee; }
+QFrame#toolBar { background: #ffffff; border: none; border-bottom: 1px solid #e4e8ee; }
+QLabel#sectionLabel { color: #8a94a2; font-size: 12px; font-weight: 600; padding: 2px; }
+QLabel#zoomChip {
+    background: #eef4fb; color: #1b4b7a; border: none;
+    border-radius: 11px; padding: 4px 12px; font-weight: 600;
+}
+
+/* ---------- 分隔手柄 / 状态栏 ---------- */
+QSplitter::handle { background: #f5f6f8; }
+QSplitter::handle:hover { background: #cfe0f2; }
+QStatusBar { background: #f5f6f8; color: #6b7684; border-top: 1px solid #e4e8ee; }
+QStatusBar::item { border: none; }
+
+/* ---------- 细滚动条 ---------- */
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: #c9d2dd; border-radius: 4px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #a8b6c6; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: #c9d2dd; border-radius: 4px; min-width: 30px; }
+QScrollBar::handle:horizontal:hover { background: #a8b6c6; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ---------- 提示气泡 ---------- */
+QToolTip {
+    background: #2b3440; color: #ffffff; border: none;
+    padding: 6px 9px; border-radius: 4px; font-size: 12px;
+}
+'''
 
 
 def clamp(v, lo, hi):
@@ -811,11 +886,15 @@ class CompareWindow(QMainWindow):
         root.setSpacing(0)
 
         # ---- 左侧: 文件夹列表 + 文件列表 ----
-        left = QWidget()
+        left = QFrame()
+        left.setObjectName('leftPanel')
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(4, 4, 4, 4)
+        lv.setContentsMargins(8, 8, 8, 8)
+        lv.setSpacing(6)
 
-        lv.addWidget(QLabel('文件夹 (勾选 = 显示分屏, 拖动可排序):'))
+        lab1 = QLabel('文件夹 (勾选 = 显示分屏, 拖动可排序):')
+        lab1.setObjectName('sectionLabel')
+        lv.addWidget(lab1)
         self.folder_list = FolderList(self)
         self.folder_list.setToolTip('拖动文件夹可调整分屏顺序')
         lv.addWidget(self.folder_list, 35)    # 上部约 35%
@@ -830,7 +909,9 @@ class CompareWindow(QMainWindow):
         grid.addWidget(self._mk_btn('清空', self.clear_folders), 1, 1)
         lv.addLayout(grid)
 
-        lv.addWidget(QLabel('图片 (所有文件夹共有的同名文件):'))
+        lab2 = QLabel('图片 (所有文件夹共有的同名文件):')
+        lab2.setObjectName('sectionLabel')
+        lv.addWidget(lab2)
         self.file_list = QListWidget()
         self.file_list.currentItemChanged.connect(self.on_file_selected)
         lv.addWidget(self.file_list, 65)      # 下部约 65%
@@ -839,7 +920,7 @@ class CompareWindow(QMainWindow):
         # ---- 右侧 (颜色保持默认浅色; 全屏时由 toggle_fullscreen_mode 收边) ----
         right = QWidget()
         rv = QVBoxLayout(right)
-        rv.setContentsMargins(4, 4, 4, 4)
+        rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(0)
         self.rv = rv
 
@@ -864,7 +945,9 @@ class CompareWindow(QMainWindow):
             '切到 100% 时以双击位置为视图中心 (所有分屏同步)')
         b_100.clicked.connect(self.apply_100)
         self.zoom_label = QLabel('100.0%')
-        self.zoom_label.setStyleSheet('font-weight:bold; padding:0 8px;')
+        self.zoom_label.setObjectName('zoomChip')
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label.setMinimumWidth(86)
         self.sync_check = QCheckBox('缩放/拖动同步')
         self.sync_check.setChecked(True)
         self.sync_check.toggled.connect(self.on_sync_toggled)
@@ -877,19 +960,25 @@ class CompareWindow(QMainWindow):
         tool.addWidget(self.zoom_label)
         tool.addWidget(self.sync_check)
         self.btn_split = QPushButton('◐ 左右对比 (S)')
+        self.btn_split.setObjectName('btnSplit')
         self.btn_split.setCheckable(True)
         self.btn_split.setToolTip(
             '仅 2 个文件夹时可用: 单屏模式, 中间分割线左边显示 A 右边显示 B,\n'
             '左右拖动分割线对比同一区域')
         self.btn_split.setEnabled(False)
         self.btn_split.clicked.connect(self.toggle_split_mode)
+        tool.addSpacing(8)
         tool.addWidget(self.btn_split)
         self.btn_fs = QPushButton('⛶ 全屏对比 (F11)')
+        self.btn_fs.setObjectName('btnFs')
         self.btn_fs.setToolTip('只保留分屏，隐藏其他所有界面 (F11 或 Esc 退出)')
         self.btn_fs.clicked.connect(self.toggle_fullscreen_mode)
         tool.addWidget(self.btn_fs)
-        tool_widget = QWidget()
+        tool_widget = QFrame()
+        tool_widget.setObjectName('toolBar')
         tool_widget.setLayout(tool)
+        tool.setContentsMargins(10, 8, 10, 8)
+        tool.setSpacing(6)
         rv.addWidget(tool_widget)
         self.tool_bar_widget = tool_widget
 
@@ -986,7 +1075,7 @@ class CompareWindow(QMainWindow):
 
     def _exit_fullscreen_mode(self):
         self.showNormal()
-        self.rv.setContentsMargins(4, 4, 4, 4)       # 恢复正常边距
+        self.rv.setContentsMargins(0, 0, 0, 0)        # 工具栏顶格, 无需边距
         self.pane_host.setAutoFillBackground(False)  # 恢复透明缝隙
         self.pane_layout.setSpacing(2)
         self.tool_bar_widget.setVisible(True)
@@ -1530,6 +1619,8 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName('ImageCompare')
+    app.setStyle('Fusion')          # 统一基线风格, QSS 覆盖出现代观感
+    app.setStyleSheet(MODERN_QSS)
     for name in ('icon.ico', 'icon.png'):
         p = resource_path(name)
         if p.exists():
