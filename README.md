@@ -1,3 +1,13 @@
+# ImageFolderCompareTool
+
+A tool to compare a set of image folders.  These Image Folders contains image with same name.
+
+# Ui of application
+<img width="1920" height="1040" alt="image" src="https://github.com/user-attachments/assets/c4aa8bff-513b-4981-8b83-442440a99928" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ca0f62f3-cdc7-45a4-86f5-d7c38d60583a" />
+
+---
+
 # 图片对比工具 (Image Compare Tool)
 
 多目录图片同步对比工具，面向**超分辨率数据集 / 算法结果对比**场景：把 HR、LR、各 SR 算法输出文件夹加进来，同一张图 N 分屏并排显示，缩放平移全同步，逐像素看清差异。
