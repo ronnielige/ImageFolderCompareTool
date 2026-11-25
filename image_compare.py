@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tif', '.tiff'}
 DEFAULT_BASE = r'\\172.17.35.42\local-disk3\lr\datasets'
 ZOOM_MIN, ZOOM_MAX = 0.01, 32.0
-MAX_PANES = 6          # 最多同时显示的分屏数
+MAX_PANES = 9          # 最多同时显示的分屏数 (3x3 网格)
 LEFT_LIST_SHORTCUT = 'Ctrl+B'
 
 # ------------------------------------------------- 现代浅色主题 (QSS)
