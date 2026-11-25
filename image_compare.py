@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import (Qt, QPointF, QRectF, Signal, QSettings, QTimer,
-                            QObject, QRunnable, QThreadPool, QEvent)
+                            QObject, QRunnable, QThreadPool, QEvent, QSize)
 from PySide6.QtGui import (QAction, QBrush, QColor, QPainter, QPixmap,
                            QKeySequence, QShortcut, QIcon, QImageReader,
                            QPalette)
@@ -69,6 +69,9 @@ QListWidget {
 QListWidget::item { padding: 5px 8px; border-radius: 5px; margin: 1px 2px; color: #2b3440; }
 QListWidget::item:hover { background: #f0f4f9; }
 QListWidget::item:selected { background: #e1eefc; color: #1b4b7a; }
+
+/* 文件夹列表放的是整行控件(setItemWidget), 不能再挤内边距, 否则文字被裁半截 */
+QListWidget#folderList::item { padding: 0px 2px; margin: 0px; }
 
 /* ---------- 复选框 (完全使用原生勾选框, 只调文字可读性) ---------- */
 QCheckBox { color: #1f2733; spacing: 6px; background: transparent; }
@@ -891,6 +894,7 @@ class CompareWindow(QMainWindow):
         lab1.setObjectName('sectionLabel')
         lv.addWidget(lab1)
         self.folder_list = FolderList(self)
+        self.folder_list.setObjectName('folderList')
         self.folder_list.setToolTip('拖动文件夹可调整分屏顺序')
         lv.addWidget(self.folder_list, 35)    # 上部约 35%
 
@@ -1141,7 +1145,8 @@ class CompareWindow(QMainWindow):
         w = FolderItemWidget(path, checked)
         w.checkbox.toggled.connect(self.on_folder_toggled)
         w.removeClicked.connect(self.remove_folder_widget)
-        item.setSizeHint(w.sizeHint())
+        item.setSizeHint(QSize(w.sizeHint().width() + 8,
+                               max(w.sizeHint().height(), 28)))
         self.folder_list.setItemWidget(item, w)
         self.folders.append((path, w))
         if not quiet:
