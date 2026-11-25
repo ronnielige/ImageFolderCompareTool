@@ -70,14 +70,8 @@ QListWidget::item { padding: 5px 8px; border-radius: 5px; margin: 1px 2px; color
 QListWidget::item:hover { background: #f0f4f9; }
 QListWidget::item:selected { background: #e1eefc; color: #1b4b7a; }
 
-/* ---------- 复选框 ---------- */
-QCheckBox { color: #3d4653; spacing: 6px; }
-QCheckBox::indicator {
-    width: 16px; height: 16px;
-    border: 1.5px solid #b8c2cf; border-radius: 4px; background: #ffffff;
-}
-QCheckBox::indicator:hover { border-color: #2d6ca3; }
-QCheckBox::indicator:checked { background: #2563eb; border-color: #2563eb; }
+/* ---------- 复选框 (完全使用原生勾选框, 只调文字可读性) ---------- */
+QCheckBox { color: #1f2733; spacing: 6px; background: transparent; }
 
 /* ---------- 左栏 / 工具栏 ---------- */
 QFrame#leftPanel { background: #f5f6f8; border: none; border-right: 1px solid #e4e8ee; }
@@ -810,10 +804,11 @@ class FolderItemWidget(QWidget):
         super().__init__(parent)
         self.path = path
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 1, 2, 1)
-        lay.setSpacing(4)
+        lay.setContentsMargins(6, 3, 2, 3)
+        lay.setSpacing(6)
         self.checkbox = QCheckBox(path.name)
         self.checkbox.setChecked(checked)
+        self.checkbox.setCursor(Qt.PointingHandCursor)
         lay.addWidget(self.checkbox, 1)
         btn = QPushButton('✕')
         btn.setFixedSize(20, 20)
