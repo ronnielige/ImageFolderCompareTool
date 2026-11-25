@@ -1,0 +1,14 @@
+# PyInstaller 打包产物与中间文件
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 临时预览/调试文件
+_installer_preview.png
