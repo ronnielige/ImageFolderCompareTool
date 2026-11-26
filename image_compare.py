@@ -135,6 +135,50 @@ def folder_has_images(folder: Path):
     return len(list_image_files(folder)) > 0
 
 
+def _mem_available():
+    """系统当前可用物理内存 (字节); 查询失败返回 None。"""
+    try:
+        import ctypes
+
+        class _MEMSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ('dwLength', ctypes.c_ulong),
+                ('dwMemoryLoad', ctypes.c_ulong),
+                ('ullTotalPhys', ctypes.c_ulonglong),
+                ('ullAvailPhys', ctypes.c_ulonglong),
+                ('ullTotalPageFile', ctypes.c_ulonglong),
+                ('ullAvailPageFile', ctypes.c_ulonglong),
+                ('ullTotalVirtual', ctypes.c_ulonglong),
+                ('ullAvailVirtual', ctypes.c_ulonglong),
+                ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+            ]
+
+        m = _MEMSTATUSEX()
+        m.dwLength = ctypes.sizeof(_MEMSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            return int(m.ullAvailPhys)
+    except Exception:
+        pass
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def _estimate_image_bytes(path):
+    """只读文件头估算解码后内存占用 (宽×高×4 字节); 读不到返回 None。"""
+    try:
+        r = QImageReader(str(path))
+        r.setAllocationLimit(0)
+        s = r.size()
+        if s.isValid() and s.width() > 0 and s.height() > 0:
+            return s.width() * s.height() * 4
+    except Exception:
+        pass
+    return None
+
+
 def load_pixmap(path):
     """加载图片为 QPixmap。
 
@@ -334,10 +378,14 @@ class ImagePane(QWidget):
             self.scale = w / self.pixmap.width()
         self.update()
 
-    def set_image(self, pixmap, path=None):
+    def set_image(self, pixmap, path=None, note=None):
         self.pixmap = pixmap
         self.path = path
-        self.placeholder = '缺少对应图片' if path is None else ''
+        # note 优先 (如 '内存不足，未加载'); 否则 path 为空时显示默认占位
+        if note is not None:
+            self.placeholder = note
+        else:
+            self.placeholder = '缺少对应图片' if path is None else ''
         if pixmap is not None and self.ref_w:
             self.scale = self.ref_w / pixmap.width()
         else:
@@ -845,6 +893,7 @@ class CompareWindow(QMainWindow):
         self._load_total = 0
         self._load_any = False     # 本代是否加载到过图片
         self._load_stem = ''
+        self._mem_warn = ''        # 内存不足时状态栏附带的警告文案
         self._ref_w_seen = 0       # 本代已加载图片的最大尺寸 (渐进更新参考系)
         self._ref_h_seen = 0
         self._load_sig = _LoadSignals()
@@ -1373,15 +1422,65 @@ class CompareWindow(QMainWindow):
             pane._loading_n = 0
             pane._loading_t0 = None
             pane.update()
+
+        # ---- 先收集各文件夹要加载的图片 ----
+        candidates = []
         for i in range(n_load):
             fname = scan_maps.get(folders[i], {}).get(stem)
             path = (folders[i] / fname) if fname else None
             if path is not None and not path.exists():
                 path = None
+            candidates.append((i, path))
+
+        # ---- 内存保护: 只读文件头估算解码后占用, 超预算的分屏不加载 ----
+        # 预算 = 可用物理内存的 50% (余量留给系统 + 当前显示的旧图 + 其他程序)
+        est_unknown = 512 * 1024 * 1024    # 文件头读不到时按 512MB 保守估计
+        avail = _mem_available()
+        budget = int(avail * 0.5) if avail else None
+        plan = []                # (i, path, note)
+        used = 0
+        n_skip = 0
+        est_total = 0
+        for i, path in candidates:
             if path is None:
+                plan.append((i, None, None))
+                continue
+            est = _estimate_image_bytes(path)
+            acct = est if est is not None else est_unknown
+            est_total += acct
+            if budget is not None and used + acct > budget:
+                plan.append((i, path, '内存不足，未加载'))
+                n_skip += 1
+            else:
+                used += acct
+                plan.append((i, path, None))
+
+        if n_skip:
+            # 内存吃紧: 先清掉当前显示的旧图, 降低峰值占用
+            for pane in self.panes:
+                if isinstance(pane, SplitComparePane):
+                    pane.set_image(None, None, '')
+                    pane.pixmap_b = None
+                    pane.path_b = None
+                    pane.update()
+                else:
+                    pane.set_image(None, None, '')
+            avail_gb = avail / (1 << 30) if avail else 0
+            self._mem_warn = (f'⚠ 内存不足: 本图 {n_load} 屏共需约 '
+                              f'{est_total / (1 << 30):.1f}GB, 可用 '
+                              f'{avail_gb:.1f}GB, 已跳过 {n_skip} 屏')
+        else:
+            self._mem_warn = ''
+
+        for i, path, note in plan:
+            if path is None and note is None:
                 # 无对应文件: 立即清屏显示"缺少对应图片", 无需等待
                 self._clear_loading(i)
                 self._apply_pane_image(i, None, None)
+            elif note is not None:
+                # 内存预算不足: 不派发解码, 显示提示占位
+                self._clear_loading(i)
+                self._apply_pane_image(i, None, path, note=note)
             else:
                 self._pending += 1
                 self._mark_loading(i, True)
@@ -1395,8 +1494,12 @@ class CompareWindow(QMainWindow):
                 f'正在加载 {stem} {self._load_pos} (0/{self._pending}) ...')
             self._load_timer.start()
         else:
-            self.statusBar().showMessage(
-                f'{stem} {self._load_pos}: 各文件夹中未找到对应图片', 4000)
+            if n_skip:
+                self.statusBar().showMessage(
+                    f'{stem} {self._load_pos} {self._mem_warn}', 8000)
+            else:
+                self.statusBar().showMessage(
+                    f'{stem} {self._load_pos}: 各文件夹中未找到对应图片', 4000)
             self._load_timer.stop()
 
     # ---------------- async loading ----------------
@@ -1416,18 +1519,18 @@ class CompareWindow(QMainWindow):
     def _clear_loading(self, folder_index):
         self._mark_loading(folder_index, False)
 
-    def _apply_pane_image(self, folder_index, pixmap, path):
+    def _apply_pane_image(self, folder_index, pixmap, path, note=None):
         """把加载结果应用到对应画格 (支持普通分屏与左右对比两种布局)。"""
         for pane in self._each_target_pane(folder_index):
             if isinstance(pane, SplitComparePane):
                 if folder_index == 0:
-                    pane.set_image(pixmap, path)      # 左侧 A
+                    pane.set_image(pixmap, path, note)      # 左侧 A
                 else:
                     pane.pixmap_b = pixmap            # 右侧 B
                     pane.path_b = path
                     pane.update()
             else:
-                pane.set_image(pixmap, path)
+                pane.set_image(pixmap, path, note)
 
     def _on_image_loaded(self, gen, folder_index, img, path_str):
         """后台解码完成 (主线程): 过期代数直接丢弃。"""
@@ -1451,8 +1554,10 @@ class CompareWindow(QMainWindow):
             n = self._load_total
             pos = getattr(self, '_load_pos', '')
             if self._load_any:
-                self.statusBar().showMessage(
-                    f'{self._load_stem} {pos} 加载完成 ({n}/{n})', 4000)
+                msg = f'{self._load_stem} {pos} 加载完成 ({n}/{n})'
+                if getattr(self, '_mem_warn', ''):
+                    msg += f'  |  {self._mem_warn}'
+                self.statusBar().showMessage(msg, 8000)
             else:
                 self.statusBar().showMessage(
                     f'{self._load_stem} {pos}: 未找到可加载的图片', 4000)
@@ -1464,8 +1569,11 @@ class CompareWindow(QMainWindow):
         """角标计时刷新 (每 200ms), 状态栏同步进度。"""
         n, total = self._load_total - self._pending, self._load_total
         if self._pending:
-            self.statusBar().showMessage(
-                f'正在加载 {self._load_stem} {self._load_pos} ({n}/{total}) ...')
+            msg = (f'正在加载 {self._load_stem} {self._load_pos} '
+                   f'({n}/{total}) ...')
+            if getattr(self, '_mem_warn', ''):
+                msg += f'  |  {self._mem_warn}'
+            self.statusBar().showMessage(msg)
         for pane in self.panes:
             if pane._loading_t0 is not None:
                 pane.update()
