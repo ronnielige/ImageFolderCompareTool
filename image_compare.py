@@ -716,7 +716,7 @@ class ImagePane(QWidget):
     def _draw_prap_table(self, p, data, x, y):
         """底部两行列对齐的 PRAP 分数表: 第一行维度名, 第二行数值。
 
-        x=None 靠左 (左下角); 否则为右边缘 x (右下角, 向左展开)。
+        x=None 贴左边缘 (同 title 样式); 否则为右边缘 x (向左展开, 贴边)。
         y 为向上抬升的像素 (给缩放徽章让位)。
         """
         dims, vals = data
@@ -733,7 +733,7 @@ class ImagePane(QWidget):
                  for i in range(len(head))]
         rh = fm.height() + 3                # 行高
         total = sum(col_w)
-        x0 = 4 if x is None else x - total - 4
+        x0 = 0 if x is None else x - total
         y0 = self.height() - 2 * rh - 4 - y
         p.fillRect(QRectF(x0, y0, total, 2 * rh), QColor(0, 0, 0, 150))
         cx = x0
