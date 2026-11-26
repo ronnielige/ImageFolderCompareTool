@@ -352,6 +352,8 @@ class ImagePane(QWidget):
         self.ref_h = 0
         self._loading_t0 = None   # 非 None 表示本屏图片正在后台加载 (计时用)
         self._loading_n = 0       # 加载中的槽位计数 (左右对比有 A/B 两张)
+        self._retry_btn = None    # "加载"按钮 (内存可能不足被跳过时显示)
+        self._retry_cb = None     # 点击"加载"后执行的重载回调
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)   # 不按键也接收鼠标移动 (跨屏位置指示)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
@@ -378,10 +380,10 @@ class ImagePane(QWidget):
             self.scale = w / self.pixmap.width()
         self.update()
 
-    def set_image(self, pixmap, path=None, note=None):
+    def set_image(self, pixmap, path=None, note=None, retry=None):
         self.pixmap = pixmap
         self.path = path
-        # note 优先 (如 '内存不足，未加载'); 否则 path 为空时显示默认占位
+        # note 优先 (如 '内存可能不足，未加载'); 否则 path 为空时显示默认占位
         if note is not None:
             self.placeholder = note
         else:
@@ -390,7 +392,43 @@ class ImagePane(QWidget):
             self.scale = self.ref_w / pixmap.width()
         else:
             self.scale = 1.0
+        # 内存不足被跳过时显示"加载"按钮, 用户可手动强制加载
+        self._retry_cb = retry if (pixmap is None and note and retry) else None
+        if self._retry_cb is not None:
+            if self._retry_btn is None:
+                self._retry_btn = QPushButton('加载', self)
+                self._retry_btn.setCursor(Qt.PointingHandCursor)
+                self._retry_btn.setToolTip('内存可能不足, 点击强制加载本屏图片')
+                self._retry_btn.clicked.connect(self._on_retry_clicked)
+            self._retry_btn.setVisible(True)
+            self._place_retry_btn()
+            self._retry_btn.raise_()
+        elif self._retry_btn is not None:
+            self._retry_btn.hide()
         self.update()
+
+    def _place_retry_btn(self):
+        """把"加载"按钮放在占位文字下方居中。"""
+        if self._retry_btn is not None and self._retry_btn.isVisible():
+            b = self._retry_btn
+            b.adjustSize()
+            b.move(max(0, (self.width() - b.width()) // 2),
+                   self.height() // 2 + 22)
+
+    def _on_retry_clicked(self):
+        cb = self._retry_cb
+        if cb is None:
+            return
+        self._retry_cb = None
+        if self._retry_btn is not None:
+            self._retry_btn.hide()
+        self.placeholder = ''
+        self.update()
+        cb()
+
+    def resizeEvent(self, ev):
+        self._place_retry_btn()
+        super().resizeEvent(ev)
 
     # ---------- loading badge ----------
     def set_loading(self, on):
@@ -588,7 +626,12 @@ class ImagePane(QWidget):
 
         if self.pixmap is None:
             p.setPen(QColor(170, 170, 170))
-            p.drawText(self.rect(), Qt.AlignCenter, self.placeholder)
+            if self._retry_cb is not None:
+                # 有"加载"按钮时文字略上移, 给按钮让位
+                r = self.rect().adjusted(0, 0, 0, -46)
+                p.drawText(r, Qt.AlignCenter, self.placeholder)
+            else:
+                p.drawText(self.rect(), Qt.AlignCenter, self.placeholder)
         else:
             target = self._image_rect()
             p.fillRect(target, checker_brush())
@@ -1433,10 +1476,13 @@ class CompareWindow(QMainWindow):
             candidates.append((i, path))
 
         # ---- 内存保护: 只读文件头估算解码后占用, 超预算的分屏不加载 ----
-        # 预算 = 可用物理内存的 50% (余量留给系统 + 当前显示的旧图 + 其他程序)
+        # 预算 = 可用物理内存 - 500MB 保留 (保证系统最后仍有 500MB 以上空余)
+        # 估算只是近似值, 所以提示用"内存可能不足"; 被跳过的分屏上有
+        # "加载"按钮, 用户可手动强制加载。
         est_unknown = 512 * 1024 * 1024    # 文件头读不到时按 512MB 保守估计
+        MEM_RESERVE = 500 * 1024 * 1024
         avail = _mem_available()
-        budget = int(avail * 0.5) if avail else None
+        budget = max(int(avail - MEM_RESERVE), 0) if avail else None
         plan = []                # (i, path, note)
         used = 0
         n_skip = 0
@@ -1449,7 +1495,7 @@ class CompareWindow(QMainWindow):
             acct = est if est is not None else est_unknown
             est_total += acct
             if budget is not None and used + acct > budget:
-                plan.append((i, path, '内存不足，未加载'))
+                plan.append((i, path, '内存可能不足，未加载'))
                 n_skip += 1
             else:
                 used += acct
@@ -1466,9 +1512,10 @@ class CompareWindow(QMainWindow):
                 else:
                     pane.set_image(None, None, '')
             avail_gb = avail / (1 << 30) if avail else 0
-            self._mem_warn = (f'⚠ 内存不足: 本图 {n_load} 屏共需约 '
+            self._mem_warn = (f'⚠ 内存可能不足: 本图 {n_load} 屏共需约 '
                               f'{est_total / (1 << 30):.1f}GB, 可用 '
-                              f'{avail_gb:.1f}GB, 已跳过 {n_skip} 屏')
+                              f'{avail_gb:.1f}GB, 已跳过 {n_skip} 屏 '
+                              f'(点分屏上"加载"可强制加载)')
         else:
             self._mem_warn = ''
 
@@ -1478,9 +1525,10 @@ class CompareWindow(QMainWindow):
                 self._clear_loading(i)
                 self._apply_pane_image(i, None, None)
             elif note is not None:
-                # 内存预算不足: 不派发解码, 显示提示占位
+                # 内存预算不足: 不派发解码, 显示提示占位 + "加载"按钮
                 self._clear_loading(i)
-                self._apply_pane_image(i, None, path, note=note)
+                self._apply_pane_image(i, None, path, note=note,
+                                       retry=self._make_retry(i, path))
             else:
                 self._pending += 1
                 self._mark_loading(i, True)
@@ -1519,18 +1567,33 @@ class CompareWindow(QMainWindow):
     def _clear_loading(self, folder_index):
         self._mark_loading(folder_index, False)
 
-    def _apply_pane_image(self, folder_index, pixmap, path, note=None):
+    def _apply_pane_image(self, folder_index, pixmap, path, note=None,
+                          retry=None):
         """把加载结果应用到对应画格 (支持普通分屏与左右对比两种布局)。"""
         for pane in self._each_target_pane(folder_index):
             if isinstance(pane, SplitComparePane):
                 if folder_index == 0:
-                    pane.set_image(pixmap, path, note)      # 左侧 A
+                    pane.set_image(pixmap, path, note, retry)   # 左侧 A
                 else:
                     pane.pixmap_b = pixmap            # 右侧 B
                     pane.path_b = path
                     pane.update()
             else:
-                pane.set_image(pixmap, path, note)
+                pane.set_image(pixmap, path, note, retry)
+
+    def _make_retry(self, folder_index, path):
+        """被内存保护跳过的分屏: 点击"加载"后忽略预算强制加载本屏。"""
+        def do_retry():
+            gen = self._load_gen
+            self._pending += 1
+            self._load_total = max(self._load_total, self._pending)
+            self._load_timer.start()
+            self._mark_loading(folder_index, True)
+            self.statusBar().showMessage(
+                f'正在强制加载 {path.name} ...')
+            QThreadPool.globalInstance().start(
+                _ImageLoadWorker(gen, folder_index, path, self._load_sig))
+        return do_retry
 
     def _on_image_loaded(self, gen, folder_index, img, path_str):
         """后台解码完成 (主线程): 过期代数直接丢弃。"""
