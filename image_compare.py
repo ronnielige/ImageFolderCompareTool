@@ -11,6 +11,7 @@
 双击图片: 适配窗口 / 100% 显示切换 (100% 时以双击位置为中心, 全部分屏同步)
 依赖: pip install PySide6
 """
+import csv
 import math
 import re
 import sys
@@ -354,6 +355,8 @@ class ImagePane(QWidget):
         self._loading_n = 0       # 加载中的槽位计数 (左右对比有 A/B 两张)
         self._retry_btn = None    # "加载"按钮 (内存可能不足被跳过时显示)
         self._retry_cb = None     # 点击"加载"后执行的重载回调
+        self.prap_text = ''       # PRAP 六维分数文本 (画在标题后)
+        self.prap_lookup = None   # 主窗口注入: Path -> str, 未加载为 None
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)   # 不按键也接收鼠标移动 (跨屏位置指示)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
@@ -405,7 +408,17 @@ class ImagePane(QWidget):
             self._retry_btn.raise_()
         elif self._retry_btn is not None:
             self._retry_btn.hide()
+        self.prap_text = self._prap_for(path, pixmap)
         self.update()
+
+    def _prap_for(self, path, pixmap):
+        """查询 PRAP 分数文本; 无数据/无图/无路径时返回 ''。"""
+        if self.prap_lookup is None or path is None or pixmap is None:
+            return ''
+        try:
+            return self.prap_lookup(path) or ''
+        except Exception:
+            return ''
 
     def _place_retry_btn(self):
         """把"加载"按钮放在占位文字下方居中。"""
@@ -677,10 +690,12 @@ class ImagePane(QWidget):
         f.setPointSize(9)
         p.setFont(f)
 
-        # 左上角: 文件夹名 + 尺寸
+        # 左上角: 文件夹名 + 尺寸 + PRAP 分数
         title = self.title
         if self.pixmap is not None:
             title += f'   {self.pixmap.width()}×{self.pixmap.height()}'
+            if self.prap_text:
+                title += f'   {self.prap_text}'
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(title) + 12
         th = fm.height() + 6
@@ -709,14 +724,16 @@ class SplitComparePane(ImagePane):
         self.title_b = title_b
         self.pixmap_b = None
         self.path_b = None
+        self.prap_text_b = ''     # B 侧 PRAP 分数文本
         self.split = 0.5          # 分割线位置 (占宽度比例 0..1)
         self._drag_div = False
 
     # ---------- data ----------
     def set_images(self, pa, path_a, pb, path_b):
-        self.set_image(pa, path_a)          # 复用基类: pixmap/scale/更新
+        self.set_image(pa, path_a)          # 复用基类: pixmap/scale/prap/更新
         self.pixmap_b = pb
         self.path_b = path_b
+        self.prap_text_b = self._prap_for(path_b, pb)
         self.update()
 
     # ---------- geometry ----------
@@ -837,9 +854,13 @@ class SplitComparePane(ImagePane):
         title_b = self.title_b
         if self.pixmap is not None:
             title_a += f'   {self.pixmap.width()}×{self.pixmap.height()}'
+            if self.prap_text:
+                title_a += f'   {self.prap_text}'
         if self.pixmap_b is not None:
             title_b = (f'{self.pixmap_b.width()}×{self.pixmap_b.height()}'
                        f'   {title_b}')
+            if self.prap_text_b:
+                title_b += f'   {self.prap_text_b}'
         tag(title_a, 6)
         tag(title_b, self.width() - 6, align_right=True)
         # 缩放比例画在右下角 (复用基类样式)
@@ -929,6 +950,12 @@ class CompareWindow(QMainWindow):
         self._fs_prev_left = None
         self._first_image_load = True   # 首次载入图片时自动适配窗口(居中)
         self.split_mode = False    # 左右单屏对比模式 (仅 2 个文件夹时可用)
+
+        # ---- PRAP 分数 (Topaz prap 六维评分 CSV) ----
+        # 主键 (文件夹名小写, 文件名小写) -> [6 个 float]
+        self._prap_by_dir_name = {}
+        self._prap_by_name = {}    # 文件名小写 -> [(dir, row), ...] 兜底唯一匹配
+        self._prap_path = ''       # 当前加载的 csv 路径 (展示用)
 
         # ---- 后台图片加载 ----
         self._load_gen = 0         # 加载代数: 快速切换文件时丢弃过期结果
@@ -1065,6 +1092,15 @@ class CompareWindow(QMainWindow):
         self.btn_fs.setToolTip('只保留分屏，隐藏其他所有界面 (F11 或 Esc 退出)')
         self.btn_fs.clicked.connect(self.toggle_fullscreen_mode)
         tool.addWidget(self.btn_fs)
+        tool.addSpacing(8)
+        self.btn_prap = QPushButton('📊 PRAP 分数')
+        self.btn_prap.setCheckable(True)
+        self.btn_prap.setToolTip(
+            '加载 Topaz PRAP 六维分数 CSV (preBlur/noise/details/halo/blur/compression),\n'
+            '加载后每张图按 "所在文件夹名+文件名" 匹配, 分数显示在分屏标题后;\n'
+            '再次点击可重新选择或清除')
+        self.btn_prap.clicked.connect(self.load_prap)
+        tool.addWidget(self.btn_prap)
         tool_widget = QFrame()
         tool_widget.setObjectName('toolBar')
         tool_widget.setLayout(tool)
@@ -1508,6 +1544,7 @@ class CompareWindow(QMainWindow):
                     pane.set_image(None, None, '')
                     pane.pixmap_b = None
                     pane.path_b = None
+                    pane.prap_text_b = ''
                     pane.update()
                 else:
                     pane.set_image(None, None, '')
@@ -1577,6 +1614,7 @@ class CompareWindow(QMainWindow):
                 else:
                     pane.pixmap_b = pixmap            # 右侧 B
                     pane.path_b = path
+                    pane.prap_text_b = pane._prap_for(path, pixmap)
                     pane.update()
             else:
                 pane.set_image(pixmap, path, note, retry)
@@ -1594,6 +1632,125 @@ class CompareWindow(QMainWindow):
             QThreadPool.globalInstance().start(
                 _ImageLoadWorker(gen, folder_index, path, self._load_sig))
         return do_retry
+
+    # ---------------- PRAP 分数 ----------------
+    @staticmethod
+    def _fmt_prap(vals):
+        parts = []
+        for v in vals:
+            parts.append(f'{v:.2f}' if v == v else '--')   # v==v 过滤 NaN
+        return 'PRAP ' + ' / '.join(parts)
+
+    def _parse_prap_csv(self, path):
+        """解析 PRAP CSV: dir,name,preBlur,noise,details,halo,blur,compression。
+
+        返回 (主键索引, 文件名索引, 维度名列表, 行数)。
+        """
+        rows = None
+        for enc in ('utf-8-sig', 'gbk'):
+            try:
+                with open(path, newline='', encoding=enc) as f:
+                    rows = list(csv.reader(f))
+                break
+            except UnicodeDecodeError:
+                continue
+        if not rows:
+            raise ValueError('无法读取 CSV 文件')
+        header = [h.strip().lower() for h in rows[0] if h.strip()]
+        if 'name' not in header or 'dir' not in header:
+            raise ValueError('CSV 需包含 dir 和 name 列')
+        idx = {h: i for i, h in enumerate(header)}
+        dims = [h for h in header if h not in ('dir', 'name')]
+        if not dims:
+            raise ValueError('CSV 中没有数值列')
+        by_key, by_name = {}, {}
+        n = 0
+        for r in rows[1:]:
+            if len(r) < len(header):
+                continue
+            d = r[idx['dir']].strip().lower()
+            nm = r[idx['name']].strip().lower()
+            if not nm:
+                continue
+            vals = []
+            for h in dims:
+                try:
+                    vals.append(float(r[idx[h]]))
+                except ValueError:
+                    vals.append(float('nan'))
+            by_key[(d, nm)] = vals
+            by_name.setdefault(nm, []).append((d, vals))
+            n += 1
+        return by_key, by_name, dims, n
+
+    def _prap_lookup(self, path):
+        """按 "所在文件夹名 + 文件名" 匹配; 文件夹名不在表中时退化为
+        全表唯一文件名匹配 (避免跨文件夹同名图错配)。"""
+        if not self._prap_by_dir_name:
+            return ''
+        p = Path(path)
+        key = (p.parent.name.lower(), p.name.lower())
+        row = self._prap_by_dir_name.get(key)
+        if row is None:
+            cands = self._prap_by_name.get(key[1])
+            if cands and len(cands) == 1:
+                row = cands[0][1]
+        if row is None:
+            return ''
+        return self._fmt_prap(row)
+
+    def _refresh_prap_display(self):
+        """PRAP 数据变化后, 重算当前已显示图片的分数文本。"""
+        for pane in self.panes:
+            if isinstance(pane, SplitComparePane):
+                pane.prap_text = pane._prap_for(pane.path, pane.pixmap)
+                pane.prap_text_b = pane._prap_for(pane.path_b, pane.pixmap_b)
+            else:
+                pane.prap_text = pane._prap_for(pane.path, pane.pixmap)
+            pane.update()
+
+    def load_prap(self):
+        """加载/重新选择/清除 PRAP 分数 CSV。"""
+        if self._prap_path:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('PRAP 分数')
+            msg.setText(f'当前已加载:\n{self._prap_path}\n\n请选择操作:')
+            b_re = msg.addButton('重新选择文件', QMessageBox.ActionRole)
+            b_clear = msg.addButton('清除', QMessageBox.DestructiveRole)
+            msg.addButton('取消', QMessageBox.RejectRole)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked is b_clear:
+                self._prap_by_dir_name = {}
+                self._prap_by_name = {}
+                self._prap_path = ''
+                self.btn_prap.setChecked(False)
+                self._refresh_prap_display()
+                self.statusBar().showMessage('已清除 PRAP 分数', 3000)
+                return
+            if clicked is not b_re:
+                return
+        start = str(self.settings.value('prapDir', '') or '')
+        fn, _ = QFileDialog.getOpenFileName(
+            self, '选择 PRAP 分数 CSV', start,
+            'CSV 文件 (*.csv);;所有文件 (*)')
+        if not fn:
+            self.btn_prap.setChecked(bool(self._prap_path))
+            return
+        try:
+            by_key, by_name, dims, n = self._parse_prap_csv(fn)
+        except Exception as e:
+            self.btn_prap.setChecked(bool(self._prap_path))
+            QMessageBox.warning(self, 'PRAP 分数', f'CSV 解析失败:\n{e}')
+            return
+        self._prap_by_dir_name = by_key
+        self._prap_by_name = by_name
+        self._prap_path = fn
+        self.settings.setValue('prapDir', str(Path(fn).parent))
+        self.btn_prap.setChecked(True)
+        self._refresh_prap_display()
+        self.statusBar().showMessage(
+            f'PRAP 分数已加载: {n} 条  ({", ".join(dims)})', 8000)
 
     def _on_image_loaded(self, gen, folder_index, img, path_str):
         """后台解码完成 (主线程): 过期代数直接丢弃。"""
@@ -1689,6 +1846,7 @@ class CompareWindow(QMainWindow):
                                     Path(folders[1]).name,
                                     self.shared, self.pane_host)
             pane.folder_index = 0
+            pane.prap_lookup = self._prap_lookup
             pane.viewChanged.connect(self.on_view_changed)
             pane.hoverMoved.connect(self.on_hover_moved)
             self.panes.append(pane)
@@ -1699,6 +1857,7 @@ class CompareWindow(QMainWindow):
             for i, folder in enumerate(folders):
                 pane = ImagePane(Path(folder).name, self.shared, self.pane_host)
                 pane.folder_index = i
+                pane.prap_lookup = self._prap_lookup
                 pane.viewChanged.connect(self.on_view_changed)
                 pane.hoverMoved.connect(self.on_hover_moved)
                 self.panes.append(pane)
