@@ -22,7 +22,7 @@ from PySide6.QtCore import (Qt, QPointF, QRectF, Signal, QSettings, QTimer,
                             QObject, QRunnable, QThreadPool, QEvent, QSize)
 from PySide6.QtGui import (QAction, QBrush, QColor, QPainter, QPixmap,
                            QKeySequence, QShortcut, QIcon, QImageReader,
-                           QPalette)
+                           QPalette, QFontMetrics)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog,
                                QListWidget, QListWidgetItem, QMainWindow,
@@ -355,8 +355,8 @@ class ImagePane(QWidget):
         self._loading_n = 0       # 加载中的槽位计数 (左右对比有 A/B 两张)
         self._retry_btn = None    # "加载"按钮 (内存可能不足被跳过时显示)
         self._retry_cb = None     # 点击"加载"后执行的重载回调
-        self.prap_text = ''       # PRAP 六维分数文本 (画在标题后)
-        self.prap_lookup = None   # 主窗口注入: Path -> str, 未加载为 None
+        self.prap_vals = None     # PRAP 六维分数 (dims, vals) 或 None
+        self.prap_lookup = None   # 主窗口注入: Path -> (dims, vals) 或 None
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)   # 不按键也接收鼠标移动 (跨屏位置指示)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
@@ -408,17 +408,17 @@ class ImagePane(QWidget):
             self._retry_btn.raise_()
         elif self._retry_btn is not None:
             self._retry_btn.hide()
-        self.prap_text = self._prap_for(path, pixmap)
+        self.prap_vals = self._prap_for(path, pixmap)
         self.update()
 
     def _prap_for(self, path, pixmap):
-        """查询 PRAP 分数文本; 无数据/无图/无路径时返回 ''。"""
+        """查询 PRAP 分数 (dims, vals); 无数据/无图/无路径时返回 None。"""
         if self.prap_lookup is None or path is None or pixmap is None:
-            return ''
+            return None
         try:
-            return self.prap_lookup(path) or ''
+            return self.prap_lookup(path)
         except Exception:
-            return ''
+            return None
 
     def _place_retry_btn(self):
         """把"加载"按钮放在占位文字下方居中。"""
@@ -690,12 +690,10 @@ class ImagePane(QWidget):
         f.setPointSize(9)
         p.setFont(f)
 
-        # 左上角: 文件夹名 + 尺寸 + PRAP 分数
+        # 左上角: 文件夹名 + 尺寸
         title = self.title
         if self.pixmap is not None:
             title += f'   {self.pixmap.width()}×{self.pixmap.height()}'
-            if self.prap_text:
-                title += f'   {self.prap_text}'
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(title) + 12
         th = fm.height() + 6
@@ -711,6 +709,44 @@ class ImagePane(QWidget):
         p.drawText(QRectF(self.width() - zw, h_ - th, zw, th),
                    Qt.AlignCenter, ztext)
 
+        # 左下角: PRAP 六维分数表 (两行, 列对齐)
+        if self.prap_vals is not None:
+            self._draw_prap_table(p, self.prap_vals, x=None, y=0)
+
+    def _draw_prap_table(self, p, data, x, y):
+        """底部两行列对齐的 PRAP 分数表: 第一行维度名, 第二行数值。
+
+        x=None 靠左 (左下角); 否则为右边缘 x (右下角, 向左展开)。
+        y 为向上抬升的像素 (给缩放徽章让位)。
+        """
+        dims, vals = data
+        p.save()
+        f = p.font()
+        f.setPointSize(8)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        short = {'compression': 'comp'}
+        head = [short.get(d, d) for d in dims]
+        nums = [f'{v:.2f}' if v == v else '--' for v in vals]
+        col_w = [max(fm.horizontalAdvance(head[i]),
+                     fm.horizontalAdvance(nums[i])) + 8
+                 for i in range(len(head))]
+        rh = fm.height() + 3                # 行高
+        total = sum(col_w)
+        x0 = 4 if x is None else x - total - 4
+        y0 = self.height() - 2 * rh - 4 - y
+        p.fillRect(QRectF(x0, y0, total, 2 * rh), QColor(0, 0, 0, 150))
+        cx = x0
+        for i, w in enumerate(col_w):
+            p.setPen(QColor(150, 160, 172))
+            p.drawText(QRectF(cx, y0, w, rh),
+                       Qt.AlignRight | Qt.AlignVCenter, head[i])
+            p.setPen(QColor(235, 235, 235))
+            p.drawText(QRectF(cx, y0 + rh, w, rh),
+                       Qt.AlignRight | Qt.AlignVCenter, nums[i])
+            cx += w
+        p.restore()
+
 
 # ---------------------------------------------------------------- SplitComparePane
 class SplitComparePane(ImagePane):
@@ -724,7 +760,7 @@ class SplitComparePane(ImagePane):
         self.title_b = title_b
         self.pixmap_b = None
         self.path_b = None
-        self.prap_text_b = ''     # B 侧 PRAP 分数文本
+        self.prap_vals_b = None  # B 侧 PRAP 分数 (dims, vals) 或 None
         self.split = 0.5          # 分割线位置 (占宽度比例 0..1)
         self._drag_div = False
 
@@ -733,7 +769,7 @@ class SplitComparePane(ImagePane):
         self.set_image(pa, path_a)          # 复用基类: pixmap/scale/prap/更新
         self.pixmap_b = pb
         self.path_b = path_b
-        self.prap_text_b = self._prap_for(path_b, pb)
+        self.prap_vals_b = self._prap_for(path_b, pb)
         self.update()
 
     # ---------- geometry ----------
@@ -854,24 +890,34 @@ class SplitComparePane(ImagePane):
         title_b = self.title_b
         if self.pixmap is not None:
             title_a += f'   {self.pixmap.width()}×{self.pixmap.height()}'
-            if self.prap_text:
-                title_a += f'   {self.prap_text}'
         if self.pixmap_b is not None:
             title_b = (f'{self.pixmap_b.width()}×{self.pixmap_b.height()}'
                        f'   {title_b}')
-            if self.prap_text_b:
-                title_b += f'   {self.prap_text_b}'
         tag(title_a, 6)
         tag(title_b, self.width() - 6, align_right=True)
-        # 缩放比例画在右下角 (复用基类样式)
+        # 缩放比例: 右下角; 若 B 侧有 PRAP 表则上移让位
         ztext = f'{zoom * 100:.1f}%'
         zw = fm.horizontalAdvance(ztext) + 12
-        th = fm.height() + 6
+        th2 = fm.height() + 6
         h_ = self.height()
-        p.fillRect(self.width() - zw, h_ - th, zw, th, QColor(0, 0, 0, 150))
+        zy = h_ - th2
+        if self.prap_vals_b is not None:
+            # PRAP 表用 8pt 字体两行, 按同一字体精确计算高度避免重叠
+            f8 = p.font()
+            f8.setPointSize(8)
+            rh8 = QFontMetrics(f8).height() + 3
+            zy -= 2 * rh8 + 8
+        p.fillRect(self.width() - zw, zy, zw, th2, QColor(0, 0, 0, 150))
         p.setPen(QColor(235, 235, 235))
-        p.drawText(QRectF(self.width() - zw, h_ - th, zw, th),
+        p.drawText(QRectF(self.width() - zw, zy, zw, th2),
                    Qt.AlignCenter, ztext)
+
+        # PRAP 表: A 侧左下角, B 侧右下角
+        if self.prap_vals is not None:
+            self._draw_prap_table(p, self.prap_vals, x=None, y=0)
+        if self.prap_vals_b is not None:
+            self._draw_prap_table(p, self.prap_vals_b,
+                                  x=self.width(), y=0)
 
 
 # ---------------------------------------------------------------- FolderList
@@ -955,6 +1001,7 @@ class CompareWindow(QMainWindow):
         # 主键 (文件夹名小写, 文件名小写) -> [6 个 float]
         self._prap_by_dir_name = {}
         self._prap_by_name = {}    # 文件名小写 -> [(dir, row), ...] 兜底唯一匹配
+        self._prap_dims = []       # 数值维度名 (与 row 一一对应)
         self._prap_path = ''       # 当前加载的 csv 路径 (展示用)
 
         # ---- 后台图片加载 ----
@@ -1544,7 +1591,7 @@ class CompareWindow(QMainWindow):
                     pane.set_image(None, None, '')
                     pane.pixmap_b = None
                     pane.path_b = None
-                    pane.prap_text_b = ''
+                    pane.prap_vals_b = None
                     pane.update()
                 else:
                     pane.set_image(None, None, '')
@@ -1614,7 +1661,7 @@ class CompareWindow(QMainWindow):
                 else:
                     pane.pixmap_b = pixmap            # 右侧 B
                     pane.path_b = path
-                    pane.prap_text_b = pane._prap_for(path, pixmap)
+                    pane.prap_vals_b = pane._prap_for(path, pixmap)
                     pane.update()
             else:
                 pane.set_image(pixmap, path, note, retry)
@@ -1634,13 +1681,6 @@ class CompareWindow(QMainWindow):
         return do_retry
 
     # ---------------- PRAP 分数 ----------------
-    @staticmethod
-    def _fmt_prap(vals):
-        parts = []
-        for v in vals:
-            parts.append(f'{v:.2f}' if v == v else '--')   # v==v 过滤 NaN
-        return 'PRAP ' + ' / '.join(parts)
-
     def _parse_prap_csv(self, path):
         """解析 PRAP CSV: dir,name,preBlur,noise,details,halo,blur,compression。
 
@@ -1685,9 +1725,10 @@ class CompareWindow(QMainWindow):
 
     def _prap_lookup(self, path):
         """按 "所在文件夹名 + 文件名" 匹配; 文件夹名不在表中时退化为
-        全表唯一文件名匹配 (避免跨文件夹同名图错配)。"""
+        全表唯一文件名匹配 (避免跨文件夹同名图错配)。
+        返回 (维度名列表, 数值列表) 或 None。"""
         if not self._prap_by_dir_name:
-            return ''
+            return None
         p = Path(path)
         key = (p.parent.name.lower(), p.name.lower())
         row = self._prap_by_dir_name.get(key)
@@ -1696,17 +1737,17 @@ class CompareWindow(QMainWindow):
             if cands and len(cands) == 1:
                 row = cands[0][1]
         if row is None:
-            return ''
-        return self._fmt_prap(row)
+            return None
+        return (self._prap_dims, row)
 
     def _refresh_prap_display(self):
         """PRAP 数据变化后, 重算当前已显示图片的分数文本。"""
         for pane in self.panes:
             if isinstance(pane, SplitComparePane):
-                pane.prap_text = pane._prap_for(pane.path, pane.pixmap)
-                pane.prap_text_b = pane._prap_for(pane.path_b, pane.pixmap_b)
+                pane.prap_vals = pane._prap_for(pane.path, pane.pixmap)
+                pane.prap_vals_b = pane._prap_for(pane.path_b, pane.pixmap_b)
             else:
-                pane.prap_text = pane._prap_for(pane.path, pane.pixmap)
+                pane.prap_vals = pane._prap_for(pane.path, pane.pixmap)
             pane.update()
 
     def load_prap(self):
@@ -1723,6 +1764,7 @@ class CompareWindow(QMainWindow):
             if clicked is b_clear:
                 self._prap_by_dir_name = {}
                 self._prap_by_name = {}
+                self._prap_dims = []
                 self._prap_path = ''
                 self.btn_prap.setChecked(False)
                 self._refresh_prap_display()
@@ -1745,6 +1787,7 @@ class CompareWindow(QMainWindow):
             return
         self._prap_by_dir_name = by_key
         self._prap_by_name = by_name
+        self._prap_dims = dims
         self._prap_path = fn
         self.settings.setValue('prapDir', str(Path(fn).parent))
         self.btn_prap.setChecked(True)
