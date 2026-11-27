@@ -853,18 +853,36 @@ class ImagePane(QWidget):
         if self.pixmap is None:
             return
         menu = QMenu(self)
-        act = menu.addAction('💾 保存图片为 PNG')
+        act = menu.addAction('💾 保存当前显示为 PNG')
         act.triggered.connect(
-            lambda: self._save_pixmap_as_png(self.pixmap, self.path))
+            lambda: self._save_view_as_png(self.render_view(), self.path))
         menu.exec(ev.globalPos())
 
-    def _save_pixmap_as_png(self, pixmap, path):
-        """把当前分屏显示的原图另存为 PNG (保存的是原始分辨率)。"""
+    def render_view(self):
+        """渲染当前视口显示内容为 QImage (窗口分辨率, 不含标题/PRAP 等
+        覆盖层; 小波模式下保存的是频域显示图)。"""
+        img = QImage(self.size(), QImage.Format_ARGB32)
+        p = QPainter(img)
+        p.fillRect(self.rect(), QColor(45, 45, 48))
+        pm = self._current_pixmap()
+        if pm is not None:
+            target = self._image_rect()
+            p.fillRect(target, checker_brush())
+            p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
+            p.drawPixmap(target, pm, QRectF(0, 0, pm.width(), pm.height()))
+            p.setPen(QColor(255, 255, 255, 60))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(target)
+        p.end()
+        return img
+
+    def _save_view_as_png(self, img, path):
+        """把当前分屏显示内容 (QImage, 窗口分辨率) 另存为 PNG。"""
         default = ''
         if path is not None:
             default = str(Path(path).with_suffix('.png'))
         fn, _ = QFileDialog.getSaveFileName(
-            self, '保存图片为 PNG', default,
+            self, '保存当前显示为 PNG', default,
             'PNG 图片 (*.png);;所有文件 (*)')
         if not fn:
             return
@@ -874,9 +892,10 @@ class ImagePane(QWidget):
         if hasattr(win, 'statusBar'):
             win.statusBar().showMessage(f'正在保存 {Path(fn).name} ...')
         QApplication.processEvents()   # 大图编码较慢, 先刷新状态栏
-        if pixmap.save(fn, 'PNG'):
+        if img.save(fn, 'PNG'):
             if hasattr(win, 'statusBar'):
-                win.statusBar().showMessage(f'已保存: {fn}', 5000)
+                win.statusBar().showMessage(
+                    f'已保存: {fn} ({img.width()}×{img.height()})', 5000)
         else:
             QMessageBox.warning(win, '保存失败', f'无法保存到:\n{fn}')
 
@@ -1082,16 +1101,25 @@ class SplitComparePane(ImagePane):
     def contextMenuEvent(self, ev):
         menu = QMenu(self)
         if self.pixmap is not None:
-            a = menu.addAction('💾 保存左侧图片为 PNG')
+            a = menu.addAction('💾 保存左侧显示为 PNG')
             a.triggered.connect(
-                lambda: self._save_pixmap_as_png(self.pixmap, self.path))
+                lambda: self._save_view_as_png(
+                    self._render_split_side(True), self.path))
         if self.pixmap_b is not None:
-            b = menu.addAction('💾 保存右侧图片为 PNG')
+            b = menu.addAction('💾 保存右侧显示为 PNG')
             b.triggered.connect(
-                lambda: self._save_pixmap_as_png(self.pixmap_b, self.path_b))
+                lambda: self._save_view_as_png(
+                    self._render_split_side(False), self.path_b))
         if menu.isEmpty():
             return
         menu.exec(ev.globalPos())
+
+    def _render_split_side(self, left):
+        """渲染分割线某一侧的当前显示内容 (无分割线、无覆盖层)。"""
+        img = self.render_view()
+        w = round(self.width() * self.split)
+        return img.copy(0, 0, w, self.height()) if left \
+            else img.copy(w, 0, self.width() - w, self.height())
 
 
 # ---------------------------------------------------------------- FolderList
