@@ -21,7 +21,7 @@ from pathlib import Path
 from PySide6.QtCore import (Qt, QPointF, QRectF, Signal, QSettings, QTimer,
                             QObject, QRunnable, QThreadPool, QEvent, QSize)
 from PySide6.QtGui import (QAction, QBrush, QColor, QPainter, QPixmap,
-                           QKeySequence, QShortcut, QIcon, QImageReader,
+                           QKeySequence, QShortcut, QIcon, QImage, QImageReader,
                            QPalette, QFontMetrics)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog,
@@ -194,6 +194,84 @@ def load_pixmap(path):
     return QPixmap.fromImage(img)
 
 
+# ------------------------------------------------- 小波变换 (频域显示)
+DWT_MAX_SIDE = 4096        # 小波计算前降采样上限 (控制内存与速度)
+
+
+def gray_from_pixmap(pixmap):
+    """QPixmap -> 灰度 numpy 数组 (H×W uint8), 最长边超过 DWT_MAX_SIDE 时降采样。"""
+    if pixmap is None:
+        return None
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    img = pixmap.toImage().convertToFormat(QImage.Format_Grayscale8)
+    m = max(img.width(), img.height())
+    if m > DWT_MAX_SIDE:
+        s = DWT_MAX_SIDE / m
+        img = img.scaled(max(1, round(img.width() * s)),
+                         max(1, round(img.height() * s)),
+                         Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    w, h = img.width(), img.height()
+    arr = np.frombuffer(img.constBits(), dtype=np.uint8)
+    arr = arr[:img.bytesPerLine() * h].reshape(h, img.bytesPerLine())
+    return arr[:, :w].copy()
+
+
+def _dwt1(x):
+    """单级 2D Haar 小波: 返回 LL, LH, HL, HH (各为输入半尺寸)。"""
+    import numpy as np
+    h2 = x.shape[0] // 2 * 2
+    w2 = x.shape[1] // 2 * 2
+    x = x[:h2, :w2]
+    a1, b1 = x[0::2, 0::2], x[0::2, 1::2]
+    c1, d1 = x[1::2, 0::2], x[1::2, 1::2]
+    ll = (a1 + b1 + c1 + d1) * 0.5
+    lh = (a1 + b1 - c1 - d1) * 0.5
+    hl = (a1 - b1 + c1 - d1) * 0.5
+    hh = (a1 - b1 - c1 + d1) * 0.5
+    return ll, lh, hl, hh
+
+
+def _norm_u8(x):
+    """子带系数逐子带 abs 归一化到 0-255 (高频看得清)。"""
+    import numpy as np
+    m = float(np.max(np.abs(x))) if x.size else 0.0
+    if m < 1e-6:
+        return np.zeros(x.shape, np.uint8)
+    return (np.abs(x) / m * 255).astype(np.uint8)
+
+
+def dwt2_pixmap(gray, levels=2):
+    """灰度数组 -> N 级 (默认 2) Haar 小波分解显示 QPixmap。
+
+    标准金字塔布局: 左上 LL (逐级细分), 右上 HL, 左下 LH, 右下 HH;
+    LL 保持原图亮度, 高频子带逐子带增强显示。
+    """
+    import numpy as np
+    H2 = gray.shape[0] // 2 * 2
+    W2 = gray.shape[1] // 2 * 2
+    a = gray[:H2, :W2].astype(np.float32)
+    h2, w2 = H2 // 2, W2 // 2
+    ll1, lh1, hl1, hh1 = _dwt1(a)
+    out = np.zeros((H2, W2), np.uint8)
+    out[:h2, w2:] = _norm_u8(hl1)
+    out[h2:, :w2] = _norm_u8(lh1)
+    out[h2:, w2:] = _norm_u8(hh1)
+    if levels >= 2 and h2 >= 2 and w2 >= 2:
+        ll2, lh2, hl2, hh2 = _dwt1(ll1)
+        h4, w4 = h2 // 2, w2 // 2
+        out[:h4, :w4] = np.clip(ll2, 0, 255).astype(np.uint8)
+        out[:h4, w4:2 * w4] = _norm_u8(hl2)
+        out[h4:2 * h4, :w4] = _norm_u8(lh2)
+        out[h4:2 * h4, w4:2 * w4] = _norm_u8(hh2)
+    else:
+        out[:h2, :w2] = np.clip(ll1, 0, 255).astype(np.uint8)
+    img = QImage(out.data, W2, H2, W2, QImage.Format_Grayscale8)
+    return QPixmap.fromImage(img.copy())
+
+
 # ------------------------------------------------- 后台加载 (防大图卡死界面)
 class _PathJumpFilter(QObject):
     """Look In 输入框的事件过滤器: 拦截回车, 跳转到粘贴的目录而不关闭对话框。"""
@@ -357,6 +435,9 @@ class ImagePane(QWidget):
         self._retry_cb = None     # 点击"加载"后执行的重载回调
         self.prap_vals = None     # PRAP 六维分数 (dims, vals) 或 None
         self.prap_lookup = None   # 主窗口注入: Path -> (dims, vals) 或 None
+        self.dwt_mode = False     # 小波频域显示模式
+        self._dwt_pm = None       # 当前图的小波显示 QPixmap (懒计算)
+        self._src_gray = None     # 当前图的降采样灰度数组 (小波输入)
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)   # 不按键也接收鼠标移动 (跨屏位置指示)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
@@ -409,6 +490,10 @@ class ImagePane(QWidget):
         elif self._retry_btn is not None:
             self._retry_btn.hide()
         self.prap_vals = self._prap_for(path, pixmap)
+        self._src_gray = gray_from_pixmap(pixmap)
+        self._dwt_pm = None
+        if self.dwt_mode and self._src_gray is not None:
+            self._dwt_pm = dwt2_pixmap(self._src_gray)
         self.update()
 
     def _prap_for(self, path, pixmap):
@@ -419,6 +504,20 @@ class ImagePane(QWidget):
             return self.prap_lookup(path)
         except Exception:
             return None
+
+    # ---------- 小波频域显示 ----------
+    def _current_pixmap(self):
+        """当前应显示的 pixmap: 小波模式下返回频域图。"""
+        if self.dwt_mode and self._dwt_pm is not None:
+            return self._dwt_pm
+        return self.pixmap
+
+    def set_dwt(self, on):
+        """切换小波频域显示; 首次开启时实时计算 (Haar 2 级)。"""
+        self.dwt_mode = on
+        if on and self._dwt_pm is None and self._src_gray is not None:
+            self._dwt_pm = dwt2_pixmap(self._src_gray)
+        self.update()
 
     def _place_retry_btn(self):
         """把"加载"按钮放在占位文字下方居中。"""
@@ -647,10 +746,10 @@ class ImagePane(QWidget):
                 p.drawText(self.rect(), Qt.AlignCenter, self.placeholder)
         else:
             target = self._image_rect()
+            pm = self._current_pixmap()
             p.fillRect(target, checker_brush())
             p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, self.pixmap, QRectF(
-                0, 0, self.pixmap.width(), self.pixmap.height()))
+            p.drawPixmap(target, pm, QRectF(0, 0, pm.width(), pm.height()))
             # 边框
             p.setPen(QColor(255, 255, 255, 60))
             p.setBrush(Qt.NoBrush)
@@ -694,6 +793,8 @@ class ImagePane(QWidget):
         title = self.title
         if self.pixmap is not None:
             title += f'   {self.pixmap.width()}×{self.pixmap.height()}'
+            if self.dwt_mode and self._dwt_pm is not None:
+                title += '   🌊DWT 2级'
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(title) + 12
         th = fm.height() + 6
@@ -793,15 +894,36 @@ class SplitComparePane(ImagePane):
         self.pixmap_b = None
         self.path_b = None
         self.prap_vals_b = None  # B 侧 PRAP 分数 (dims, vals) 或 None
+        self._dwt_pm_b = None    # B 侧小波显示 QPixmap (懒计算)
+        self._src_gray_b = None  # B 侧降采样灰度数组
         self.split = 0.5          # 分割线位置 (占宽度比例 0..1)
         self._drag_div = False
 
     # ---------- data ----------
     def set_images(self, pa, path_a, pb, path_b):
-        self.set_image(pa, path_a)          # 复用基类: pixmap/scale/prap/更新
+        self.set_image(pa, path_a)          # 复用基类: pixmap/scale/prap/dwt/更新
         self.pixmap_b = pb
         self.path_b = path_b
         self.prap_vals_b = self._prap_for(path_b, pb)
+        self._src_gray_b = gray_from_pixmap(pb)
+        self._dwt_pm_b = None
+        if self.dwt_mode and self._src_gray_b is not None:
+            self._dwt_pm_b = dwt2_pixmap(self._src_gray_b)
+        self.update()
+
+    def _current_pixmap_b(self):
+        if self.dwt_mode and self._dwt_pm_b is not None:
+            return self._dwt_pm_b
+        return self.pixmap_b
+
+    def set_dwt(self, on):
+        """切换小波频域显示 (A/B 两侧都实时计算)。"""
+        self.dwt_mode = on
+        if on:
+            if self._dwt_pm is None and self._src_gray is not None:
+                self._dwt_pm = dwt2_pixmap(self._src_gray)
+            if self._dwt_pm_b is None and self._src_gray_b is not None:
+                self._dwt_pm_b = dwt2_pixmap(self._src_gray_b)
         self.update()
 
     # ---------- geometry ----------
@@ -866,22 +988,24 @@ class SplitComparePane(ImagePane):
         half = self._divider_x()
 
         # 左侧: A (clip 后绘制, 分割线两侧各画一次完整图像)
-        if self.pixmap is not None:
+        pm_a = self._current_pixmap()
+        pm_b = self._current_pixmap_b()
+        if pm_a is not None:
             p.save()
             p.setClipRect(QRectF(0, 0, half, self.height()))
             p.fillRect(target, checker_brush())
             p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, self.pixmap, QRectF(
-                0, 0, self.pixmap.width(), self.pixmap.height()))
+            p.drawPixmap(target, pm_a, QRectF(
+                0, 0, pm_a.width(), pm_a.height()))
             p.restore()
         # 右侧: B
-        if self.pixmap_b is not None:
+        if pm_b is not None:
             p.save()
             p.setClipRect(QRectF(half, 0, self.width() - half, self.height()))
             p.fillRect(target, checker_brush())
             p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, self.pixmap_b, QRectF(
-                0, 0, self.pixmap_b.width(), self.pixmap_b.height()))
+            p.drawPixmap(target, pm_b, QRectF(
+                0, 0, pm_b.width(), pm_b.height()))
             p.restore()
 
         # 分割线 (白线 + 中心小把手)
@@ -922,9 +1046,13 @@ class SplitComparePane(ImagePane):
         title_b = self.title_b
         if self.pixmap is not None:
             title_a += f'   {self.pixmap.width()}×{self.pixmap.height()}'
+            if self.dwt_mode and self._dwt_pm is not None:
+                title_a += '   🌊DWT'
         if self.pixmap_b is not None:
             title_b = (f'{self.pixmap_b.width()}×{self.pixmap_b.height()}'
                        f'   {title_b}')
+            if self.dwt_mode and self._dwt_pm_b is not None:
+                title_b += '   🌊DWT'
         tag(title_a, 6)
         tag(title_b, self.width() - 6, align_right=True)
         # 缩放比例: 右下角; 若 B 侧有 PRAP 表则上移让位
@@ -1049,6 +1177,9 @@ class CompareWindow(QMainWindow):
         self._prap_by_name = {}    # 文件名小写 -> [(dir, row), ...] 兜底唯一匹配
         self._prap_dims = []       # 数值维度名 (与 row 一一对应)
         self._prap_path = ''       # 当前加载的 csv 路径 (展示用)
+
+        # ---- 小波频域显示 ----
+        self.dwt_mode = False      # True = 各分屏显示 Haar 2 级小波分解
 
         # ---- 后台图片加载 ----
         self._load_gen = 0         # 加载代数: 快速切换文件时丢弃过期结果
@@ -1194,6 +1325,15 @@ class CompareWindow(QMainWindow):
             '再次点击可重新选择或清除')
         self.btn_prap.clicked.connect(self.load_prap)
         tool.addWidget(self.btn_prap)
+        tool.addSpacing(8)
+        self.btn_dwt = QPushButton('🌊 小波变换')
+        self.btn_dwt.setCheckable(True)
+        self.btn_dwt.setToolTip(
+            '切换小波变换频域显示 (Haar 2 级): LL 低频保持原图亮度,\n'
+            'LH/HL/HH 高频子带逐子带增强显示; 基于灰度图, 最长边 4096 内实时计算;\n'
+            '再次点击恢复原图显示')
+        self.btn_dwt.clicked.connect(self.toggle_dwt)
+        tool.addWidget(self.btn_dwt)
         tool_widget = QFrame()
         tool_widget.setObjectName('toolBar')
         tool_widget.setLayout(tool)
@@ -1638,6 +1778,8 @@ class CompareWindow(QMainWindow):
                     pane.pixmap_b = None
                     pane.path_b = None
                     pane.prap_vals_b = None
+                    pane._src_gray_b = None
+                    pane._dwt_pm_b = None
                     pane.update()
                 else:
                     pane.set_image(None, None, '')
@@ -1708,6 +1850,10 @@ class CompareWindow(QMainWindow):
                     pane.pixmap_b = pixmap            # 右侧 B
                     pane.path_b = path
                     pane.prap_vals_b = pane._prap_for(path, pixmap)
+                    pane._src_gray_b = gray_from_pixmap(pixmap)
+                    pane._dwt_pm_b = None
+                    if pane.dwt_mode and pane._src_gray_b is not None:
+                        pane._dwt_pm_b = dwt2_pixmap(pane._src_gray_b)
                     pane.update()
             else:
                 pane.set_image(pixmap, path, note, retry)
@@ -1841,6 +1987,16 @@ class CompareWindow(QMainWindow):
         self.statusBar().showMessage(
             f'PRAP 分数已加载: {n} 条  ({", ".join(dims)})', 8000)
 
+    def toggle_dwt(self):
+        """切换所有分屏的小波频域显示模式。"""
+        self.dwt_mode = not self.dwt_mode
+        self.btn_dwt.setChecked(self.dwt_mode)
+        for pane in self.panes:
+            pane.set_dwt(self.dwt_mode)
+        self.statusBar().showMessage(
+            '小波变换显示: 开 (Haar 2 级)' if self.dwt_mode
+            else '小波变换显示: 关', 3000)
+
     def _on_image_loaded(self, gen, folder_index, img, path_str):
         """后台解码完成 (主线程): 过期代数直接丢弃。"""
         if gen != self._load_gen:
@@ -1936,6 +2092,8 @@ class CompareWindow(QMainWindow):
                                     self.shared, self.pane_host)
             pane.folder_index = 0
             pane.prap_lookup = self._prap_lookup
+            if self.dwt_mode:
+                pane.set_dwt(True)
             pane.viewChanged.connect(self.on_view_changed)
             pane.hoverMoved.connect(self.on_hover_moved)
             self.panes.append(pane)
@@ -1947,6 +2105,8 @@ class CompareWindow(QMainWindow):
                 pane = ImagePane(Path(folder).name, self.shared, self.pane_host)
                 pane.folder_index = i
                 pane.prap_lookup = self._prap_lookup
+                if self.dwt_mode:
+                    pane.set_dwt(True)
                 pane.viewChanged.connect(self.on_view_changed)
                 pane.hoverMoved.connect(self.on_hover_moved)
                 self.panes.append(pane)
