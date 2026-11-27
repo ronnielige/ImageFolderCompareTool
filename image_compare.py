@@ -559,21 +559,33 @@ class ImagePane(QWidget):
         return self.pixmap
 
     def _view_gray(self, pm=None):
-        """当前视口可见图像内容 -> 灰度数组 (裁剪到图像显示区域)。"""
-        img = self.render_view(pm)
+        """当前视口可见图像内容 -> 灰度数组 (裁剪到图像显示区域)。
+
+        pm=None 时固定取原图 self.pixmap —— 决不能用频域谱图作输入,
+        否则会发生"对谱图再算谱"的反馈循环。
+        """
         if pm is None:
-            pm = self._current_pixmap()
+            pm = self.pixmap
         if pm is None:
             return None
+        img = self.render_view(pm)
         r = self._image_rect().toRect().intersected(self.rect())
         if r.isValid() and not r.isEmpty():
             img = img.copy(r)
         return gray_from_qimage(img)
 
+    def _visible_image_rect(self):
+        """图像矩形与窗口的交集; 频域谱图按 1:1 铺回这个区域。"""
+        r = self._image_rect().intersected(QRectF(self.rect()))
+        if r.isValid() and r.width() > 1 and r.height() > 1:
+            return r
+        return None
+
     def update_freq(self):
         """对当前视口内容实时重算频域谱图 (小波/DCT)。"""
         self._freq_pm = None
-        if self.freq_mode and self.pixmap is not None:
+        if (self.freq_mode and self.pixmap is not None
+                and self._visible_image_rect() is not None):
             g = self._view_gray()
             if g is not None:
                 if self.freq_mode == 'dct':
@@ -818,14 +830,23 @@ class ImagePane(QWidget):
                 p.drawText(self.rect(), Qt.AlignCenter, self.placeholder)
         else:
             target = self._image_rect()
-            pm = self._current_pixmap()
-            p.fillRect(target, checker_brush())
-            p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, pm, QRectF(0, 0, pm.width(), pm.height()))
-            # 边框
-            p.setPen(QColor(255, 255, 255, 60))
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(target)
+            # 频域模式: 谱图由"可见区域"算出, 必须 1:1 铺回同一区域,
+            # 否则谱图被拉伸到整幅图矩形上, LL 低频会跑到屏幕外
+            vis = self._visible_image_rect()
+            if self.freq_mode and self._freq_pm is not None and vis is not None:
+                target = vis
+                pm = self._freq_pm
+            else:
+                pm = self._current_pixmap()
+            if pm is not None:
+                p.fillRect(target, checker_brush())
+                p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
+                p.drawPixmap(target, pm, QRectF(
+                    0, 0, pm.width(), pm.height()))
+                # 边框
+                p.setPen(QColor(255, 255, 255, 60))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(target)
 
         self._draw_overlays(p, st.zoom)
         self._draw_hover_marker(p)
@@ -937,6 +958,15 @@ class ImagePane(QWidget):
         img = QImage(self.size(), QImage.Format_ARGB32)
         p = QPainter(img)
         p.fillRect(self.rect(), QColor(45, 45, 48))
+        if pm is None and self.freq_mode and self._freq_pm is not None:
+            # 保存当前频域显示: 谱图 1:1 铺回可见区域 (与屏幕一致)
+            vis = self._visible_image_rect()
+            if vis is not None:
+                p.drawPixmap(vis, self._freq_pm, QRectF(
+                    0, 0, self._freq_pm.width(), self._freq_pm.height()))
+                p.end()
+                return img
+            pm = self.pixmap
         if pm is None:
             pm = self._current_pixmap()
         if pm is not None:
@@ -1009,7 +1039,7 @@ class SplitComparePane(ImagePane):
         """对当前视口内容重算 A/B 两侧频域谱图。"""
         self._freq_pm = None
         self._freq_pm_b = None
-        if self.freq_mode:
+        if self.freq_mode and self._visible_image_rect() is not None:
             if self.pixmap is not None:
                 g = self._view_gray(self._current_pixmap_src('a'))
                 if g is not None:
@@ -1095,24 +1125,33 @@ class SplitComparePane(ImagePane):
         target = self._image_rect()
         half = self._divider_x()
 
+        # 频域模式: 谱图 1:1 铺回可见区域 (与计算来源一致, 避免错位)
+        vis = self._visible_image_rect()
+        use_freq_a = (self.freq_mode and self._freq_pm is not None
+                      and vis is not None)
+        use_freq_b = (self.freq_mode and self._freq_pm_b is not None
+                      and vis is not None)
+        ta = vis if use_freq_a else target
+        tb = vis if use_freq_b else target
+
         # 左侧: A (clip 后绘制, 分割线两侧各画一次完整图像)
-        pm_a = self._current_pixmap()
-        pm_b = self._current_pixmap_b()
+        pm_a = self._freq_pm if use_freq_a else self._current_pixmap()
+        pm_b = self._freq_pm_b if use_freq_b else self._current_pixmap_b()
         if pm_a is not None:
             p.save()
             p.setClipRect(QRectF(0, 0, half, self.height()))
-            p.fillRect(target, checker_brush())
+            p.fillRect(ta, checker_brush())
             p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, pm_a, QRectF(
+            p.drawPixmap(ta, pm_a, QRectF(
                 0, 0, pm_a.width(), pm_a.height()))
             p.restore()
         # 右侧: B
         if pm_b is not None:
             p.save()
             p.setClipRect(QRectF(half, 0, self.width() - half, self.height()))
-            p.fillRect(target, checker_brush())
+            p.fillRect(tb, checker_brush())
             p.setRenderHint(QPainter.SmoothPixmapTransform, self._smooth)
-            p.drawPixmap(target, pm_b, QRectF(
+            p.drawPixmap(tb, pm_b, QRectF(
                 0, 0, pm_b.width(), pm_b.height()))
             p.restore()
 
@@ -1207,6 +1246,21 @@ class SplitComparePane(ImagePane):
 
     def _render_split_side(self, left):
         """渲染分割线某一侧的当前显示内容 (无分割线、无覆盖层)。"""
+        # 频域模式: 该侧画自己的谱图, 1:1 铺回可见区域
+        vis = self._visible_image_rect()
+        if self.freq_mode and vis is not None:
+            fpm = self._freq_pm if left else self._freq_pm_b
+            if fpm is not None:
+                img = QImage(self.size(), QImage.Format_ARGB32)
+                p = QPainter(img)
+                p.fillRect(self.rect(), QColor(45, 45, 48))
+                p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                p.drawPixmap(vis, fpm, QRectF(
+                    0, 0, fpm.width(), fpm.height()))
+                p.end()
+                w = round(self.width() * self.split)
+                return img.copy(0, 0, w, self.height()) if left \
+                    else img.copy(w, 0, self.width() - w, self.height())
         img = self.render_view()
         w = round(self.width() * self.split)
         return img.copy(0, 0, w, self.height()) if left \
