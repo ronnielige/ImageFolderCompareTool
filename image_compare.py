@@ -582,16 +582,27 @@ class ImagePane(QWidget):
         return None
 
     def update_freq(self):
-        """对当前视口内容实时重算频域谱图 (小波/DCT)。"""
-        self._freq_pm = None
-        if (self.freq_mode and self.pixmap is not None
-                and self._visible_image_rect() is not None):
-            g = self._view_gray()
-            if g is not None:
-                if self.freq_mode == 'dct':
-                    self._freq_pm = dct2_pixmap(g)
-                else:
-                    self._freq_pm = dwt2_pixmap(g)
+        """对当前视口内容实时重算频域谱图 (小波/DCT)。
+
+        先算出新的谱图再赋值: 计算中途出错时保留旧谱 (分屏不会退回
+        原图显示), 异常打印到控制台便于排查。
+        """
+        vis = self._visible_image_rect()
+        if not (self.freq_mode and self.pixmap is not None
+                and vis is not None):
+            self._freq_pm = None
+            self.update()
+            return
+        new_pm = None
+        g = self._view_gray()
+        if g is not None:
+            try:
+                new_pm = (dct2_pixmap(g) if self.freq_mode == 'dct'
+                          else dwt2_pixmap(g))
+            except Exception:
+                import traceback
+                traceback.print_exc()   # 保留旧谱, 不退回原图
+        self._freq_pm = new_pm
         self.update()
 
     def set_freq_mode(self, mode):
@@ -665,14 +676,19 @@ class ImagePane(QWidget):
         统一映射: widget(r) = w/2 - (r - center)*zoom, r 为参考坐标。
         scale 只影响矩形宽高(低分辨率图拉伸到与参考相同的显示尺寸),
         不影响中心偏移——这样所有屏显示的参考区域严格一致。
+        图片尚未加载时退回参考尺寸 (rect 仍有效, 供频域计算/绘制使用)。
         """
         st = self.state()
         z = st.zoom                       # 参考缩放 (widget px / ref px)
-        z_img = z * self.scale            # 本图像素缩放
+        if self.pixmap is not None:
+            z_img = z * self.scale        # 本图像素缩放
+            pw, ph = self.pixmap.width(), self.pixmap.height()
+        else:
+            z_img = z
+            pw, ph = self._ref_size()
         cx = self.width() / 2 - st.center.x() * z
         cy = self.height() / 2 - st.center.y() * z
-        return QRectF(cx, cy, self.pixmap.width() * z_img,
-                      self.pixmap.height() * z_img)
+        return QRectF(cx, cy, pw * z_img, ph * z_img)
 
     def _clamp_center(self):
         st = self.state()
@@ -1036,22 +1052,34 @@ class SplitComparePane(ImagePane):
         return self.pixmap_b
 
     def update_freq(self):
-        """对当前视口内容重算 A/B 两侧频域谱图。"""
-        self._freq_pm = None
-        self._freq_pm_b = None
-        if self.freq_mode and self._visible_image_rect() is not None:
-            if self.pixmap is not None:
-                g = self._view_gray(self._current_pixmap_src('a'))
-                if g is not None:
-                    self._freq_pm = (dct2_pixmap(g)
-                                     if self.freq_mode == 'dct'
-                                     else dwt2_pixmap(g))
-            if self.pixmap_b is not None:
-                g = self._view_gray(self._current_pixmap_src('b'))
-                if g is not None:
-                    self._freq_pm_b = (dct2_pixmap(g)
-                                       if self.freq_mode == 'dct'
-                                       else dwt2_pixmap(g))
+        """对当前视口内容重算 A/B 两侧频域谱图 (先算后赋值, 出错保留旧谱)。"""
+        vis = self._visible_image_rect()
+        if not (self.freq_mode and vis is not None):
+            self._freq_pm = None
+            self._freq_pm_b = None
+            self.update()
+            return
+        new_a = new_b = None
+        if self.pixmap is not None:
+            g = self._view_gray(self._current_pixmap_src('a'))
+            if g is not None:
+                try:
+                    new_a = (dct2_pixmap(g) if self.freq_mode == 'dct'
+                             else dwt2_pixmap(g))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+        if self.pixmap_b is not None:
+            g = self._view_gray(self._current_pixmap_src('b'))
+            if g is not None:
+                try:
+                    new_b = (dct2_pixmap(g) if self.freq_mode == 'dct'
+                             else dwt2_pixmap(g))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+        self._freq_pm = new_a
+        self._freq_pm_b = new_b
         self.update()
 
     def _current_pixmap_src(self, side):
@@ -1353,6 +1381,7 @@ class CompareWindow(QMainWindow):
 
         # ---- 频域分析 (小波/DCT) ----
         self.freq_mode = None      # None | 'dwt' | 'dct'
+        self._freq_last_mode = 'dwt'   # W 快捷键恢复用的最近一次频域模式
         self._freq_timer = QTimer(self)
         self._freq_timer.setSingleShot(True)
         self._freq_timer.setInterval(300)   # 视口变化后防抖重算
@@ -1507,7 +1536,8 @@ class CompareWindow(QMainWindow):
         self.btn_freq.setToolTip(
             '选择频域分析模式 (基于每个分屏当前显示的内容):\n'
             '小波频谱 = Haar 2 级小波分解金字塔; DCT 频谱 = log|DCT2| 谱;\n'
-            '再次点击已选中的菜单项可关闭频域显示, 恢复原图')
+            '再次点击已选中的菜单项可关闭频域显示, 恢复原图\n\n'
+            '快捷键 W = 原图 <-> 频域视图切换 (沿用最近一次的模式)')
         freq_menu = QMenu(self.btn_freq)
         self.act_dwt = freq_menu.addAction('小波频谱分析 (2 Level)')
         self.act_dwt.setCheckable(True)
@@ -1566,7 +1596,12 @@ class CompareWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_F5), self, self.refresh_files)
         QShortcut(QKeySequence(Qt.Key_F11), self, self.toggle_fullscreen_mode)
         QShortcut(QKeySequence(Qt.Key_S), self, self._shortcut_split)
+        QShortcut(QKeySequence(Qt.Key_W), self, self.toggle_freq_view)
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._escape_pressed)
+
+    def toggle_freq_view(self):
+        """W 键: 原图 <-> 频域视图切换 (沿用最近一次选择的频域模式)。"""
+        self.set_freq_mode(None if self.freq_mode else self._freq_last_mode)
 
     def toggle_split_mode(self):
         """左右单屏对比模式 (仅 2 个文件夹时可用)。"""
@@ -2171,6 +2206,8 @@ class CompareWindow(QMainWindow):
         if self.freq_mode == mode:
             mode = None
         self.freq_mode = mode
+        if mode:
+            self._freq_last_mode = mode
         self.act_dwt.setChecked(mode == 'dwt')
         self.act_dct.setChecked(mode == 'dct')
         for pane in self.panes:
@@ -2202,6 +2239,10 @@ class CompareWindow(QMainWindow):
             self._ref_h_seen = max(self._ref_h_seen, pm.height())
             for pane in self.panes:
                 pane.set_reference(self._ref_w_seen, self._ref_h_seen)
+            # 参考尺寸变化 → 图像矩形变化, 已算好的谱图会错位;
+            # 防抖后统一重算 (等本批图片基本到齐, 避免逐张重复计算)
+            if self.freq_mode:
+                self._freq_timer.start()
         done = self._pending == 0
         if done:
             self._load_timer.stop()
