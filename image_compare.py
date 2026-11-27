@@ -339,11 +339,11 @@ def _box_mean(x, r):
     return x
 
 
-def _ssim_arrays(a, b):
-    """两个同尺寸灰度 float 数组的 SSIM (结构相似度, 范围约 -1..1)。
+def _ssim_map(a, b):
+    """两个同尺寸灰度 float 数组的 SSIM 逐像素谱图。
 
     标准 8 邻域 box 窗口 (r=4) 实现, 无 scipy/skimage 依赖;
-    尺寸过小 (min<8) 时退化为全局统计量版本的 SSIM。
+    尺寸过小 (min<8) 时退化为全局统计量版本 (整图一个值)。
     """
     import numpy as np
     a = a.astype(np.float64)
@@ -355,8 +355,9 @@ def _ssim_arrays(a, b):
         va = float(a.var()) + 1e-9
         vb = float(b.var()) + 1e-9
         cov = float(((a - ma) * (b - mb)).mean())
-        return (2 * ma * mb + C1) * (2 * cov + C2) / \
-               ((ma * ma + mb * mb + C1) * (va + vb + C2))
+        v = (2 * ma * mb + C1) * (2 * cov + C2) / \
+            ((ma * ma + mb * mb + C1) * (va + vb + C2))
+        return np.full(a.shape, v, dtype=np.float64)
     r = 4
     mu_a = _box_mean(a, r)
     mu_b = _box_mean(b, r)
@@ -365,7 +366,31 @@ def _ssim_arrays(a, b):
     s_ab = _box_mean(a * b, r) - mu_a * mu_b
     num = (2 * mu_a * mu_b + C1) * (2 * s_ab + C2)
     den = (mu_a * mu_a + mu_b * mu_b + C1) * (s_a + s_b + C2)
-    return float(np.clip(np.mean(num / den), -1.0, 1.0))
+    return num / den
+
+
+def _ssim_arrays(a, b):
+    """整图平均 SSIM (范围约 -1..1)。"""
+    import numpy as np
+    return float(np.clip(np.mean(_ssim_map(a, b)), -1.0, 1.0))
+
+
+def _lowfreq_mask(shape):
+    """频谱比较掩码: True = 参与指标计算。
+
+    屏蔽左上角低频区 —— DWT 2 级金字塔的左上 1/4 是 LL2 低频
+    (近似原图缩略图), DCT 谱的低频能量也集中在左上; 高频细节
+    才是对比重点。屏蔽范围外扩 SSIM 窗口半径 (4px), 避免窗口
+    统计被低频值污染。
+    """
+    import numpy as np
+    h, w = shape
+    r = 4
+    cy = min(h // 2 + r, h)
+    cx = min(w // 2 + r, w)
+    mask = np.ones((h, w), dtype=bool)
+    mask[:cy, :cx] = False
+    return mask
 
 
 # ------------------------------------------------- 后台加载 (防大图卡死界面)
@@ -2408,6 +2433,8 @@ class CompareWindow(QMainWindow):
         """谱图 pm 与参考数组比较, 返回 (L1, SSIM)。
 
         各分屏谱图尺寸随视口不同, 先缩放到参考尺寸再逐像素比较。
+        左上角低频区 (DWT 2 级的 LL2 象限 / DCT 的低频能量集中区)
+        被屏蔽, 不参与两个指标的计算 —— 高频细节才是对比重点。
         任一指标失败返回 None。
         """
         if ref_arr is None or pm is None:
@@ -2421,8 +2448,12 @@ class CompareWindow(QMainWindow):
             if arr is None:
                 return None
             a = arr.astype(np.float32)
-            l1 = float(np.mean(np.abs(a - ref_arr)))
-            ssim = _ssim_arrays(a, ref_arr)
+            mask = _lowfreq_mask(a.shape)
+            if not mask.any():
+                return None
+            l1 = float(np.mean(np.abs(a - ref_arr)[mask]))
+            ssim_map = _ssim_map(a, ref_arr)
+            ssim = float(np.clip(np.mean(ssim_map[mask]), -1.0, 1.0))
             return (l1, ssim)
         except Exception:
             import traceback
