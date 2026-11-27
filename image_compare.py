@@ -487,6 +487,10 @@ class ImagePane(QWidget):
         self.prap_lookup = None   # 主窗口注入: Path -> (dims, vals) 或 None
         self.freq_mode = None     # 频域分析模式: None | 'dwt' | 'dct'
         self._freq_pm = None      # 当前视口的频域显示 QPixmap
+        self.l1_text = None       # 与参考频谱的 L1 差距文本 (左下角徽章)
+        self._freq_ref_cb = None     # 主窗口注入: (谱图pm, title) -> 设为参考
+        self._freq_ref_clear = None  # 主窗口注入: 清除参考 (存在时才非 None)
+        self._freq_changed_cb = None  # 主窗口注入: 谱图重算后刷新 L1 文本
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)   # 不按键也接收鼠标移动 (跨屏位置指示)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
@@ -603,6 +607,8 @@ class ImagePane(QWidget):
                 import traceback
                 traceback.print_exc()   # 保留旧谱, 不退回原图
         self._freq_pm = new_pm
+        if self._freq_changed_cb is not None:
+            self._freq_changed_cb()   # 参考频谱存在时刷新 L1 文本
         self.update()
 
     def set_freq_mode(self, mode):
@@ -924,6 +930,29 @@ class ImagePane(QWidget):
         if self.prap_vals is not None:
             self._draw_prap_table(p, self.prap_vals, x=None, y=0)
 
+        # 左下角: 与参考频谱的 L1 差距 (PRAP 表存在时画在其上方)
+        if self.l1_text:
+            self._draw_l1_badge(p)
+
+    def _draw_l1_badge(self, p):
+        """左下角 L1 差距徽章: 参考分屏标 ★, 其余显示 L1 数值。"""
+        p.save()
+        f = p.font()
+        f.setPointSize(8)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        rh = fm.height() + 3
+        w = fm.horizontalAdvance(self.l1_text) + 12
+        y0 = self.height() - rh - 2
+        if self.prap_vals is not None:
+            y0 -= 2 * rh + 4          # 给 PRAP 两行表让位
+        is_ref = '★' in self.l1_text
+        p.fillRect(QRectF(0, y0, w, rh), QColor(0, 70, 120, 170))
+        p.setPen(QColor(150, 205, 255) if is_ref else QColor(235, 235, 235))
+        p.drawText(QRectF(6, y0, w - 6, rh),
+                   Qt.AlignLeft | Qt.AlignVCenter, self.l1_text)
+        p.restore()
+
     def _draw_prap_table(self, p, data, x, y):
         """底部两行列对齐的 PRAP 分数表: 第一行维度名, 第二行数值。
 
@@ -966,6 +995,14 @@ class ImagePane(QWidget):
         act = menu.addAction('💾 保存当前显示为 PNG')
         act.triggered.connect(
             lambda: self._save_view_as_png(self.render_view(), self.path))
+        if self.freq_mode and self._freq_pm is not None:
+            a2 = menu.addAction('🎯 设为参考频谱')
+            a2.setToolTip('以本屏频谱为参考, 其他分屏显示与它的 L1 差距')
+            a2.triggered.connect(
+                lambda: self._freq_ref_cb(self._freq_pm, self.title))
+        if self._freq_ref_clear is not None:
+            a3 = menu.addAction('✖ 清除参考频谱')
+            a3.triggered.connect(self._freq_ref_clear)
         menu.exec(ev.globalPos())
 
     def render_view(self, pm=None):
@@ -1080,6 +1117,8 @@ class SplitComparePane(ImagePane):
                     traceback.print_exc()
         self._freq_pm = new_a
         self._freq_pm_b = new_b
+        if self._freq_changed_cb is not None:
+            self._freq_changed_cb()   # 参考频谱存在时刷新 L1 文本
         self.update()
 
     def _current_pixmap_src(self, side):
@@ -1256,6 +1295,10 @@ class SplitComparePane(ImagePane):
             self._draw_prap_table(p, self.prap_vals_b,
                                   x=self.width(), y=0)
 
+        # 左下角: 与参考频谱的 L1 差距 (A 侧)
+        if self.l1_text:
+            self._draw_l1_badge(p)
+
     def contextMenuEvent(self, ev):
         menu = QMenu(self)
         if self.pixmap is not None:
@@ -1268,6 +1311,14 @@ class SplitComparePane(ImagePane):
             b.triggered.connect(
                 lambda: self._save_view_as_png(
                     self._render_split_side(False), self.path_b))
+        if self.freq_mode and self._freq_pm is not None:
+            f = menu.addAction('🎯 设为参考频谱 (左侧)')
+            f.setToolTip('以左侧频谱为参考, 其他分屏显示与它的 L1 差距')
+            f.triggered.connect(
+                lambda: self._freq_ref_cb(self._freq_pm, self.title))
+        if self._freq_ref_clear is not None:
+            c = menu.addAction('✖ 清除参考频谱')
+            c.triggered.connect(self._freq_ref_clear)
         if menu.isEmpty():
             return
         menu.exec(ev.globalPos())
@@ -1386,6 +1437,10 @@ class CompareWindow(QMainWindow):
         self._freq_timer.setSingleShot(True)
         self._freq_timer.setInterval(300)   # 视口变化后防抖重算
         self._freq_timer.timeout.connect(self._recalc_freq)
+
+        # ---- 参考频谱 (L1 差距对比) ----
+        self._freq_ref_arr = None   # 参考频谱快照 (灰度 float 数组)
+        self._freq_ref_title = ''   # 参考来源分屏标题
 
         # ---- 后台图片加载 ----
         self._load_gen = 0         # 加载代数: 快速切换文件时丢弃过期结果
@@ -2205,13 +2260,21 @@ class CompareWindow(QMainWindow):
         """设置频域分析模式 (None/'dwt'/'dct'); 同一模式再次选择即关闭。"""
         if self.freq_mode == mode:
             mode = None
+        prev = self.freq_mode
         self.freq_mode = mode
         if mode:
             self._freq_last_mode = mode
         self.act_dwt.setChecked(mode == 'dwt')
         self.act_dct.setChecked(mode == 'dct')
+        if prev is not None and mode is not None and prev != mode:
+            self._clear_freq_ref()      # 换了谱图类型, 旧参考失效
         for pane in self.panes:
             pane.set_freq_mode(mode)
+        if mode is None and self._freq_ref_arr is not None:
+            # 关闭频域: 只隐藏徽章, 保留参考 (同模式再次开启时恢复显示)
+            for pane in self.panes:
+                pane.l1_text = None
+                pane.update()
         self._freq_timer.stop()
         names = {'dwt': '小波频谱 (Haar 2 级)', 'dct': 'DCT 频谱'}
         self.statusBar().showMessage(
@@ -2222,6 +2285,69 @@ class CompareWindow(QMainWindow):
         if self.freq_mode:
             for pane in self.panes:
                 pane.update_freq()
+
+    # ---------------- 参考频谱 L1 对比 ----------------
+    def _set_freq_ref(self, pm, title):
+        """把某分屏当前频谱设为参考快照, 其余分屏计算 L1 差距。"""
+        import numpy as np
+        arr = gray_from_qimage(pm.toImage())
+        if arr is None:
+            return
+        self._freq_ref_arr = arr.astype(np.float32)
+        self._freq_ref_title = title
+        for pane in self.panes:
+            pane._freq_ref_clear = self._clear_freq_ref
+        self._update_freq_l1()
+        self.statusBar().showMessage(
+            f'已设为参考频谱: {title}  (右键菜单可清除)', 5000)
+
+    def _clear_freq_ref(self):
+        """清除参考频谱, 隐藏所有 L1 徽章。"""
+        self._freq_ref_arr = None
+        self._freq_ref_title = ''
+        for pane in self.panes:
+            pane._freq_ref_clear = None
+            pane.l1_text = None
+            pane.update()
+
+    def _update_freq_l1(self):
+        """参考频谱存在时, 重算各分屏与参考的 L1 差距并刷新左下角文本。
+
+        各分屏谱图尺寸随视口不同, 先缩放到参考尺寸再逐像素比较。
+        """
+        if self._freq_ref_arr is None:
+            return
+        for pane in self.panes:
+            if pane._freq_pm is None:
+                pane.l1_text = 'L1 --'
+            else:
+                l1 = self._l1_vs_ref(pane._freq_pm)
+                if l1 is None:
+                    pane.l1_text = 'L1 --'
+                elif pane.title == self._freq_ref_title:
+                    pane.l1_text = f'★ 参考  L1 {l1:.2f}'
+                else:
+                    pane.l1_text = f'L1 {l1:.2f}'
+            pane.update()
+
+    def _l1_vs_ref(self, pm):
+        """谱图 pm 与参考快照的平均绝对差 (灰度 0-255 尺度)。"""
+        ref = self._freq_ref_arr
+        if ref is None or pm is None:
+            return None
+        try:
+            import numpy as np
+            img = pm.toImage().convertToFormat(QImage.Format_Grayscale8)
+            img = img.scaled(ref.shape[1], ref.shape[0],
+                             Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            arr = gray_from_qimage(img, max_side=1 << 30)
+            if arr is None:
+                return None
+            return float(np.mean(np.abs(arr.astype(np.float32) - ref)))
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _on_image_loaded(self, gen, folder_index, img, path_str):
         """后台解码完成 (主线程): 过期代数直接丢弃。"""
@@ -2322,6 +2448,10 @@ class CompareWindow(QMainWindow):
                                     self.shared, self.pane_host)
             pane.folder_index = 0
             pane.prap_lookup = self._prap_lookup
+            pane._freq_ref_cb = self._set_freq_ref
+            pane._freq_changed_cb = self._update_freq_l1
+            if self._freq_ref_arr is not None:
+                pane._freq_ref_clear = self._clear_freq_ref
             if self.freq_mode:
                 pane.set_freq_mode(self.freq_mode)
             pane.viewChanged.connect(self.on_view_changed)
@@ -2335,6 +2465,10 @@ class CompareWindow(QMainWindow):
                 pane = ImagePane(Path(folder).name, self.shared, self.pane_host)
                 pane.folder_index = i
                 pane.prap_lookup = self._prap_lookup
+                pane._freq_ref_cb = self._set_freq_ref
+                pane._freq_changed_cb = self._update_freq_l1
+                if self._freq_ref_arr is not None:
+                    pane._freq_ref_clear = self._clear_freq_ref
                 if self.freq_mode:
                     pane.set_freq_mode(self.freq_mode)
                 pane.viewChanged.connect(self.on_view_changed)
