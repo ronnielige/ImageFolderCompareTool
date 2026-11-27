@@ -25,7 +25,7 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QPainter, QPixmap,
                            QPalette, QFontMetrics)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog,
-                               QListWidget, QListWidgetItem, QMainWindow,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QSplitter,
                                QAbstractItemView, QVBoxLayout, QWidget,
                                QListView, QTreeView,
@@ -747,6 +747,38 @@ class ImagePane(QWidget):
             cx += w
         p.restore()
 
+    # ---------- 右键菜单 ----------
+    def contextMenuEvent(self, ev):
+        if self.pixmap is None:
+            return
+        menu = QMenu(self)
+        act = menu.addAction('💾 保存图片为 PNG')
+        act.triggered.connect(
+            lambda: self._save_pixmap_as_png(self.pixmap, self.path))
+        menu.exec(ev.globalPos())
+
+    def _save_pixmap_as_png(self, pixmap, path):
+        """把当前分屏显示的原图另存为 PNG (保存的是原始分辨率)。"""
+        default = ''
+        if path is not None:
+            default = str(Path(path).with_suffix('.png'))
+        fn, _ = QFileDialog.getSaveFileName(
+            self, '保存图片为 PNG', default,
+            'PNG 图片 (*.png);;所有文件 (*)')
+        if not fn:
+            return
+        if not fn.lower().endswith('.png'):
+            fn += '.png'
+        win = self.window()
+        if hasattr(win, 'statusBar'):
+            win.statusBar().showMessage(f'正在保存 {Path(fn).name} ...')
+        QApplication.processEvents()   # 大图编码较慢, 先刷新状态栏
+        if pixmap.save(fn, 'PNG'):
+            if hasattr(win, 'statusBar'):
+                win.statusBar().showMessage(f'已保存: {fn}', 5000)
+        else:
+            QMessageBox.warning(win, '保存失败', f'无法保存到:\n{fn}')
+
 
 # ---------------------------------------------------------------- SplitComparePane
 class SplitComparePane(ImagePane):
@@ -918,6 +950,20 @@ class SplitComparePane(ImagePane):
         if self.prap_vals_b is not None:
             self._draw_prap_table(p, self.prap_vals_b,
                                   x=self.width(), y=0)
+
+    def contextMenuEvent(self, ev):
+        menu = QMenu(self)
+        if self.pixmap is not None:
+            a = menu.addAction('💾 保存左侧图片为 PNG')
+            a.triggered.connect(
+                lambda: self._save_pixmap_as_png(self.pixmap, self.path))
+        if self.pixmap_b is not None:
+            b = menu.addAction('💾 保存右侧图片为 PNG')
+            b.triggered.connect(
+                lambda: self._save_pixmap_as_png(self.pixmap_b, self.path_b))
+        if menu.isEmpty():
+            return
+        menu.exec(ev.globalPos())
 
 
 # ---------------------------------------------------------------- FolderList
