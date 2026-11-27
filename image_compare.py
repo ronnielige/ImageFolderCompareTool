@@ -322,6 +322,52 @@ def dct2_pixmap(gray):
     return QPixmap.fromImage(img.copy())
 
 
+def _box_mean(x, r):
+    """分离 box 均值滤波 (O(N), cumsum 实现, reflect 边界)。"""
+    import numpy as np
+    for axis in (0, 1):
+        n = 2 * r + 1
+        pad = [(0, 0), (0, 0)]
+        pad[axis] = (r, r)
+        xp = np.pad(x, pad, mode='reflect')
+        cs = np.cumsum(xp, axis=axis)
+        zshape = list(cs.shape)
+        zshape[axis] = 1
+        cs = np.concatenate([np.zeros(zshape, dtype=cs.dtype), cs], axis=axis)
+        x = (np.take(cs, range(n, cs.shape[axis]), axis=axis)
+             - np.take(cs, range(0, cs.shape[axis] - n), axis=axis)) / n
+    return x
+
+
+def _ssim_arrays(a, b):
+    """两个同尺寸灰度 float 数组的 SSIM (结构相似度, 范围约 -1..1)。
+
+    标准 8 邻域 box 窗口 (r=4) 实现, 无 scipy/skimage 依赖;
+    尺寸过小 (min<8) 时退化为全局统计量版本的 SSIM。
+    """
+    import numpy as np
+    a = a.astype(np.float64)
+    b = b.astype(np.float64)
+    C1 = (0.01 * 255) ** 2
+    C2 = (0.03 * 255) ** 2
+    if min(a.shape) < 8:
+        ma, mb = float(a.mean()), float(b.mean())
+        va = float(a.var()) + 1e-9
+        vb = float(b.var()) + 1e-9
+        cov = float(((a - ma) * (b - mb)).mean())
+        return (2 * ma * mb + C1) * (2 * cov + C2) / \
+               ((ma * ma + mb * mb + C1) * (va + vb + C2))
+    r = 4
+    mu_a = _box_mean(a, r)
+    mu_b = _box_mean(b, r)
+    s_a = _box_mean(a * a, r) - mu_a * mu_a
+    s_b = _box_mean(b * b, r) - mu_b * mu_b
+    s_ab = _box_mean(a * b, r) - mu_a * mu_b
+    num = (2 * mu_a * mu_b + C1) * (2 * s_ab + C2)
+    den = (mu_a * mu_a + mu_b * mu_b + C1) * (s_a + s_b + C2)
+    return float(np.clip(np.mean(num / den), -1.0, 1.0))
+
+
 # ------------------------------------------------- 后台加载 (防大图卡死界面)
 class _PathJumpFilter(QObject):
     """Look In 输入框的事件过滤器: 拦截回车, 跳转到粘贴的目录而不关闭对话框。"""
@@ -2327,7 +2373,7 @@ class CompareWindow(QMainWindow):
         if ref_pane._freq_pm is None:
             # 参考屏谱图尚未就绪 (图片加载中): 全部显示占位
             for pane in self.panes:
-                pane.l1_text = 'L1 --'
+                pane.l1_text = 'L1 --  SSIM --'
                 pane.update()
             return
         ref_arr = self._gray_arr_of(ref_pane._freq_pm)
@@ -2335,13 +2381,16 @@ class CompareWindow(QMainWindow):
             return
         for pane in self.panes:
             if pane._freq_pm is None:
-                pane.l1_text = 'L1 --'
+                pane.l1_text = 'L1 --  SSIM --'
             elif pane is ref_pane:
-                pane.l1_text = '★ 参考  L1 0.00'
+                pane.l1_text = '★ 参考  L1 0.00  SSIM 1.00'
             else:
-                l1 = self._l1_vs_ref(pane._freq_pm, ref_arr)
-                pane.l1_text = (f'L1 {l1:.2f}' if l1 is not None
-                                else 'L1 --')
+                res = self._compare_vs_ref(pane._freq_pm, ref_arr)
+                if res is None:
+                    pane.l1_text = 'L1 --  SSIM --'
+                else:
+                    l1, ssim = res
+                    pane.l1_text = f'L1 {l1:.2f}  SSIM {ssim:.2f}'
             pane.update()
 
     def _gray_arr_of(self, pm):
@@ -2355,10 +2404,11 @@ class CompareWindow(QMainWindow):
             traceback.print_exc()
             return None
 
-    def _l1_vs_ref(self, pm, ref_arr):
-        """谱图 pm 与参考数组的平均绝对差 (灰度 0-255 尺度)。
+    def _compare_vs_ref(self, pm, ref_arr):
+        """谱图 pm 与参考数组比较, 返回 (L1, SSIM)。
 
         各分屏谱图尺寸随视口不同, 先缩放到参考尺寸再逐像素比较。
+        任一指标失败返回 None。
         """
         if ref_arr is None or pm is None:
             return None
@@ -2370,7 +2420,10 @@ class CompareWindow(QMainWindow):
             arr = gray_from_qimage(img, max_side=1 << 30)
             if arr is None:
                 return None
-            return float(np.mean(np.abs(arr.astype(np.float32) - ref_arr)))
+            a = arr.astype(np.float32)
+            l1 = float(np.mean(np.abs(a - ref_arr)))
+            ssim = _ssim_arrays(a, ref_arr)
+            return (l1, ssim)
         except Exception:
             import traceback
             traceback.print_exc()
