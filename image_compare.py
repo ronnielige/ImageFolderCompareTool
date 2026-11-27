@@ -1439,8 +1439,7 @@ class CompareWindow(QMainWindow):
         self._freq_timer.timeout.connect(self._recalc_freq)
 
         # ---- 参考频谱 (L1 差距对比) ----
-        self._freq_ref_arr = None   # 参考频谱快照 (灰度 float 数组)
-        self._freq_ref_title = ''   # 参考来源分屏标题
+        self._freq_ref_title = ''   # 参考来源分屏标题 (动态跟随切图)
 
         # ---- 后台图片加载 ----
         self._load_gen = 0         # 加载代数: 快速切换文件时丢弃过期结果
@@ -2270,7 +2269,7 @@ class CompareWindow(QMainWindow):
             self._clear_freq_ref()      # 换了谱图类型, 旧参考失效
         for pane in self.panes:
             pane.set_freq_mode(mode)
-        if mode is None and self._freq_ref_arr is not None:
+        if mode is None and self._freq_ref_title:
             # 关闭频域: 只隐藏徽章, 保留参考 (同模式再次开启时恢复显示)
             for pane in self.panes:
                 pane.l1_text = None
@@ -2288,12 +2287,12 @@ class CompareWindow(QMainWindow):
 
     # ---------------- 参考频谱 L1 对比 ----------------
     def _set_freq_ref(self, pm, title):
-        """把某分屏当前频谱设为参考快照, 其余分屏计算 L1 差距。"""
-        import numpy as np
-        arr = gray_from_qimage(pm.toImage())
-        if arr is None:
-            return
-        self._freq_ref_arr = arr.astype(np.float32)
+        """把某分屏设为参考分屏, 其余分屏实时计算与它的 L1 差距。
+
+        只记录参考分屏的标题, 不存静态快照 —— 每次计算时实时取
+        参考分屏当前的谱图, 这样切换图片/缩放后参考自动跟随,
+        参考分屏的 L1 永远为 0。
+        """
         self._freq_ref_title = title
         for pane in self.panes:
             pane._freq_ref_clear = self._clear_freq_ref
@@ -2303,7 +2302,6 @@ class CompareWindow(QMainWindow):
 
     def _clear_freq_ref(self):
         """清除参考频谱, 隐藏所有 L1 徽章。"""
-        self._freq_ref_arr = None
         self._freq_ref_title = ''
         for pane in self.panes:
             pane._freq_ref_clear = None
@@ -2311,39 +2309,68 @@ class CompareWindow(QMainWindow):
             pane.update()
 
     def _update_freq_l1(self):
-        """参考频谱存在时, 重算各分屏与参考的 L1 差距并刷新左下角文本。
+        """参考分屏存在时, 重算各分屏与其当前谱图的 L1 差距。
 
-        各分屏谱图尺寸随视口不同, 先缩放到参考尺寸再逐像素比较。
+        每次都实时取参考分屏的谱图作基准 —— 切换图片后参考屏的谱图
+        已重算, 其他屏随之更新, 参考屏恒为 0, 无需重新指定参考。
         """
-        if self._freq_ref_arr is None:
+        if not self._freq_ref_title:
+            return
+        ref_pane = None
+        for pane in self.panes:
+            if pane.title == self._freq_ref_title:
+                ref_pane = pane
+                break
+        if ref_pane is None:
+            self._clear_freq_ref()   # 参考分屏已被重建/移除
+            return
+        if ref_pane._freq_pm is None:
+            # 参考屏谱图尚未就绪 (图片加载中): 全部显示占位
+            for pane in self.panes:
+                pane.l1_text = 'L1 --'
+                pane.update()
+            return
+        ref_arr = self._gray_arr_of(ref_pane._freq_pm)
+        if ref_arr is None:
             return
         for pane in self.panes:
             if pane._freq_pm is None:
                 pane.l1_text = 'L1 --'
+            elif pane is ref_pane:
+                pane.l1_text = '★ 参考  L1 0.00'
             else:
-                l1 = self._l1_vs_ref(pane._freq_pm)
-                if l1 is None:
-                    pane.l1_text = 'L1 --'
-                elif pane.title == self._freq_ref_title:
-                    pane.l1_text = f'★ 参考  L1 {l1:.2f}'
-                else:
-                    pane.l1_text = f'L1 {l1:.2f}'
+                l1 = self._l1_vs_ref(pane._freq_pm, ref_arr)
+                pane.l1_text = (f'L1 {l1:.2f}' if l1 is not None
+                                else 'L1 --')
             pane.update()
 
-    def _l1_vs_ref(self, pm):
-        """谱图 pm 与参考快照的平均绝对差 (灰度 0-255 尺度)。"""
-        ref = self._freq_ref_arr
-        if ref is None or pm is None:
+    def _gray_arr_of(self, pm):
+        """谱图 QPixmap -> 灰度 float32 数组 (不缩放)。"""
+        try:
+            import numpy as np
+            arr = gray_from_qimage(pm.toImage(), max_side=1 << 30)
+            return None if arr is None else arr.astype(np.float32)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _l1_vs_ref(self, pm, ref_arr):
+        """谱图 pm 与参考数组的平均绝对差 (灰度 0-255 尺度)。
+
+        各分屏谱图尺寸随视口不同, 先缩放到参考尺寸再逐像素比较。
+        """
+        if ref_arr is None or pm is None:
             return None
         try:
             import numpy as np
             img = pm.toImage().convertToFormat(QImage.Format_Grayscale8)
-            img = img.scaled(ref.shape[1], ref.shape[0],
+            img = img.scaled(ref_arr.shape[1], ref_arr.shape[0],
                              Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             arr = gray_from_qimage(img, max_side=1 << 30)
             if arr is None:
                 return None
-            return float(np.mean(np.abs(arr.astype(np.float32) - ref)))
+            return float(np.mean(np.abs(arr.astype(np.float32) - ref_arr)))
         except Exception:
             import traceback
             traceback.print_exc()
@@ -2450,7 +2477,7 @@ class CompareWindow(QMainWindow):
             pane.prap_lookup = self._prap_lookup
             pane._freq_ref_cb = self._set_freq_ref
             pane._freq_changed_cb = self._update_freq_l1
-            if self._freq_ref_arr is not None:
+            if self._freq_ref_title:
                 pane._freq_ref_clear = self._clear_freq_ref
             if self.freq_mode:
                 pane.set_freq_mode(self.freq_mode)
@@ -2467,7 +2494,7 @@ class CompareWindow(QMainWindow):
                 pane.prap_lookup = self._prap_lookup
                 pane._freq_ref_cb = self._set_freq_ref
                 pane._freq_changed_cb = self._update_freq_l1
-                if self._freq_ref_arr is not None:
+                if self._freq_ref_title:
                     pane._freq_ref_clear = self._clear_freq_ref
                 if self.freq_mode:
                     pane.set_freq_mode(self.freq_mode)
